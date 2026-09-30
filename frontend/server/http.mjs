@@ -65,6 +65,7 @@ function json(response, status, value) {
 
 export function createBridgeServer({ service, distDirectory, port = 4317 }) {
   const server = createServer(async (request, response) => {
+    let mutationDispatched = false;
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("X-Frame-Options", "DENY");
@@ -89,7 +90,9 @@ export function createBridgeServer({ service, distDirectory, port = 4317 }) {
           return json(response, 200, await service.preview(await readJson(request)));
         }
         if (request.method === "POST" && url.pathname === `${API}apply`) {
-          return json(response, 200, await service.apply(await readJson(request)));
+          const body = await readJson(request);
+          mutationDispatched = true;
+          return json(response, 200, await service.apply(body));
         }
         throw new BridgeError("not_found", "API が見つからないか、HTTP メソッドが異なります。", 404);
       }
@@ -138,6 +141,8 @@ export function createBridgeServer({ service, distDirectory, port = 4317 }) {
         error: {
           code: known ? error.code : "internal_error",
           message: known ? error.message : "ローカル連携でエラーが発生しました。状態を確認してからやり直してください。",
+          mutationState: !mutationDispatched || (known && error.mutationState === "not_started")
+            ? "not_started" : "unknown",
         },
       });
     }

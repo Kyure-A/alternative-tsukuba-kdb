@@ -10,6 +10,7 @@ import {
   additionFor,
   currentAcademicYear,
   normalizeSnapshot,
+  normalizeSnapshots,
   validateModule,
 } from "./catalog.mjs";
 import { BridgeError, serialize } from "./runner.mjs";
@@ -89,11 +90,8 @@ export function createTwinsService({
   };
   const read = async (module) =>
     normalizeSnapshot(await run({ kind: "read", module }), module, now());
-  const readAll = async () => {
-    const snapshots = {};
-    for (const module of Object.keys(MODULES)) snapshots[module] = await read(module);
-    return snapshots;
-  };
+  const readAll = async () =>
+    normalizeSnapshots(await run({ kind: "read-all" }), now());
   const record = async (value) => {
     try {
       await journal({ recordedAt: now().toISOString(), ...value });
@@ -191,119 +189,138 @@ export function createTwinsService({
         return structuredClone(review);
       });
     },
-    apply(body) {
-      requireObject(body);
-      validateYear(body.confirmedAcademicYear);
-      if (typeof body.id !== "string" || body.id.length > 100) {
-        throw new BridgeError("invalid_request", "差分 ID が正しくありません。");
-      }
-      const selected = stringSet(body.actionKeys, "適用する操作");
-      if (!selected.size) throw new BridgeError("no_actions", "適用する操作を選択してください。");
-      return exclusive(async () => {
-        validateYear(body.confirmedAcademicYear);
-        const plan = plans.get(body.id);
-        if (!plan || Date.parse(plan.review.expiresAt) <= now().getTime()) {
+    async apply(body) {
+      let mutationStarted = false;
+      try {
+        requireObject(body);
+        validateYear(body.academicYear);
+        if (typeof body.id !== "string" || body.id.length > 100) {
+          throw new BridgeError("invalid_request", "差分 ID が正しくありません。");
+        }
+        const selected = stringSet(body.actionKeys, "適用する操作");
+        if (!selected.size) throw new BridgeError("no_actions", "適用する操作を選択してください。");
+        return await exclusive(async () => {
+          validateYear(body.academicYear);
+          const plan = plans.get(body.id);
+          if (!plan || Date.parse(plan.review.expiresAt) <= now().getTime()) {
+            plans.delete(body.id);
+            throw new BridgeError("expired_plan", "差分が期限切れか使用済みです。もう一度差分を確認してください。", 409);
+          }
+          const available = [...plan.review.additions, ...plan.review.removals];
+          if ([...selected].some((key) => !available.some((action) => action.key === key))) {
+            throw new BridgeError("invalid_actions", "この差分に含まれない操作が指定されました。");
+          }
+          // Additions precede removals, regardless of request order. A failed add
+          // must never trigger a later removal to make room automatically.
+          const actions = available.filter((action) => selected.has(action.key));
           plans.delete(body.id);
-          throw new BridgeError("expired_plan", "差分が期限切れか使用済みです。もう一度差分を確認してください。", 409);
-        }
-        const available = [...plan.review.additions, ...plan.review.removals];
-        if ([...selected].some((key) => !available.some((action) => action.key === key))) {
-          throw new BridgeError("invalid_actions", "この差分に含まれない操作が指定されました。");
-        }
-        // Additions precede removals, regardless of request order. A failed add
-        // must never trigger a later removal to make room automatically.
-        const actions = available.filter((action) => selected.has(action.key));
-        plans.delete(body.id);
-        await record({ kind: "consumed", planId: body.id, module: plan.review.before.module, academicYear: ACADEMIC_YEAR, actions });
-        let current;
-        try {
-          current = await readAll();
-        } catch (error) {
-          await record({ kind: "preflight_failed", planId: body.id, code: error.code ?? "read_failed" });
-          throw new BridgeError("preflight_failed", "適用前の TWINS 再確認に失敗しました。変更は行っていません。差分を作り直してください。", 409);
-        }
-        if (signatures(current) !== signatures(plan.snapshots)) {
-          await record({ kind: "stale", planId: body.id });
-          throw new BridgeError("stale_plan", "差分確認後に TWINS の時間割が変わりました。変更は行っていません。差分を作り直してください。", 409);
-        }
-        validateYear(body.confirmedAcademicYear);
-        if (Date.parse(plan.review.expiresAt) <= now().getTime()) {
-          await record({ kind: "expired_during_preflight", planId: body.id });
-          throw new BridgeError("expired_plan", "適用前の再確認中に差分の有効期限が切れました。変更は行っていません。差分を作り直してください。", 409);
-        }
-        const operations = actions.map(({ key, kind, code }) => ({ key, kind, code, status: "skipped" }));
-        const attempted = new Set();
-        let stopped = false;
-        let journalFailed = false;
-        for (let index = 0; index < actions.length; index++) {
-          const action = actions[index];
-          const operation = operations[index];
+          await record({ kind: "consumed", planId: body.id, module: plan.review.before.module, academicYear: ACADEMIC_YEAR, actions });
+          let current;
           try {
-            await record({ kind: "started", planId: body.id, actionKey: action.key });
-          } catch {
-            operation.message = "操作記録を保存できなかったため、この操作以降を停止しました。";
-            stopped = true;
-            journalFailed = true;
-            break;
-          }
-          attempted.add(action.code);
-          try {
-            await run(action);
-            operation.status = "uncertain";
+            current = await readAll();
           } catch (error) {
-            operation.status = "uncertain";
-            operation.message = error instanceof BridgeError ? error.message : "TWINS の操作を完了できませんでした。";
-            stopped = true;
+            await record({
+              kind: "preflight_failed", planId: body.id,
+              code: error instanceof BridgeError ? error.code : "read_failed",
+              ...(Number.isInteger(error.exitCode) ? { exitCode: error.exitCode } : {}),
+              ...(Number.isInteger(error.httpStatus) ? { httpStatus: error.httpStatus } : {}),
+            });
+            const reason = error instanceof BridgeError ? error.message : "TWINS の時間割を取得できませんでした。";
+            throw new BridgeError("preflight_failed", `${reason} 履修は変更していません。差分を再取得してください。`, 409);
           }
+          if (signatures(current) !== signatures(plan.snapshots)) {
+            await record({ kind: "stale", planId: body.id });
+            throw new BridgeError("stale_plan", "差分確認後に TWINS の時間割が変わりました。変更は行っていません。差分を作り直してください。", 409);
+          }
+          validateYear(body.academicYear);
+          if (Date.parse(plan.review.expiresAt) <= now().getTime()) {
+            await record({ kind: "expired_during_preflight", planId: body.id });
+            throw new BridgeError("expired_plan", "適用前の再確認中に差分の有効期限が切れました。変更は行っていません。差分を作り直してください。", 409);
+          }
+          const operations = actions.map(({ key, kind, code }) => ({ key, kind, code, status: "skipped" }));
+          const attempted = new Set();
+          let stopped = false;
+          let journalFailed = false;
+          for (let index = 0; index < actions.length; index++) {
+            const action = actions[index];
+            const operation = operations[index];
+            try {
+              await record({ kind: "started", planId: body.id, actionKey: action.key });
+            } catch {
+              operation.message = "操作記録を保存できなかったため、この操作以降を停止しました。";
+              stopped = true;
+              journalFailed = true;
+              break;
+            }
+            attempted.add(action.code);
+            try {
+              mutationStarted = true;
+              await run(action);
+              operation.status = "uncertain";
+            } catch (error) {
+              operation.status = "uncertain";
+              operation.message = error instanceof BridgeError ? error.message : "TWINS の操作を完了できませんでした。";
+              stopped = true;
+            }
+            try {
+              await record({ kind: "command_finished", planId: body.id, operation });
+            } catch {
+              stopped = true;
+              journalFailed = true;
+            }
+            if (stopped) break;
+          }
+          let afterAll = null;
+          let verificationError = null;
           try {
-            await record({ kind: "command_finished", planId: body.id, operation });
+            afterAll = await readAll();
           } catch {
-            stopped = true;
-            journalFailed = true;
+            verificationError = "適用後の時間割を確認できませんでした。再実行せず TWINS で現在の状態を確認してください。";
           }
-          if (stopped) break;
-        }
-        let afterAll = null;
-        let verificationError = null;
-        try {
-          afterAll = await readAll();
-        } catch {
-          verificationError = "適用後の時間割を確認できませんでした。再実行せず TWINS で現在の状態を確認してください。";
-        }
-        let unexpectedChange = false;
-        if (afterAll) {
-          unexpectedChange = signatures(current, attempted) !== signatures(afterAll, attempted);
-          const finalCodes = Object.fromEntries(Object.keys(MODULES).map((module) => [module, codeSet(afterAll[module])]));
-          for (const operation of operations) {
-            if (!attempted.has(operation.code)) continue;
-            const action = actions.find((candidate) => candidate.key === operation.key);
-            const matches = operation.kind === "add"
-              ? action.expectedModules.every((module) => finalCodes[module].has(operation.code))
-              : Object.keys(MODULES).every((module) => !finalCodes[module].has(operation.code));
-            operation.status = unexpectedChange ? "uncertain" : matches ? "verified" : "failed";
-            if (!matches && !unexpectedChange) operation.message = "再取得した全学期の時間割で、この操作の結果を確認できませんでした。";
+          let unexpectedChange = false;
+          if (afterAll) {
+            unexpectedChange = signatures(current, attempted) !== signatures(afterAll, attempted);
+            const finalCodes = Object.fromEntries(Object.keys(MODULES).map((module) => [module, codeSet(afterAll[module])]));
+            for (const operation of operations) {
+              if (!attempted.has(operation.code)) continue;
+              const action = actions.find((candidate) => candidate.key === operation.key);
+              const matches = operation.kind === "add"
+                ? action.expectedModules.every((module) => finalCodes[module].has(operation.code))
+                : Object.keys(MODULES).every((module) => !finalCodes[module].has(operation.code));
+              operation.status = unexpectedChange ? "uncertain" : matches ? "verified" : "failed";
+              if (!matches && !unexpectedChange) operation.message = "再取得した全学期の時間割で、この操作の結果を確認できませんでした。";
+            }
           }
+          const result = {
+            status: !afterAll || unexpectedChange || journalFailed
+              ? "uncertain"
+              : operations.every((operation) => operation.status === "verified") ? "verified" : "partial",
+            operations,
+            after: afterAll?.[plan.review.before.module] ?? null,
+            snapshots: afterAll,
+          };
+          if (verificationError) result.message = verificationError;
+          else if (unexpectedChange) result.message = "選択していない科目にも変更が見つかりました。再実行せず TWINS で全学期の状態を確認してください。";
+          else if (journalFailed) result.message = "操作記録の保存に失敗しました。TWINS で状態を確認してから新しい差分を作成してください。";
+          else if (stopped || result.status === "partial") result.message = "途中で停止しました。結果を確認し、必要な変更は新しい差分から行ってください。";
+          try {
+            await record({ kind: "result", planId: body.id, result });
+          } catch {
+            result.status = "uncertain";
+            result.message = "最終結果の記録を保存できませんでした。再実行せず TWINS で状態を確認してください。";
+          }
+          return result;
+        });
+      } catch (error) {
+        if (!mutationStarted) {
+          const failure = error instanceof BridgeError ? error : new BridgeError(
+            "internal_error", "変更の準備に失敗しました。履修は変更していません。", 500,
+          );
+          failure.mutationState = "not_started";
+          throw failure;
         }
-        const result = {
-          status: !afterAll || unexpectedChange || journalFailed
-            ? "uncertain"
-            : operations.every((operation) => operation.status === "verified") ? "verified" : "partial",
-          operations,
-          after: afterAll?.[plan.review.before.module] ?? null,
-          snapshots: afterAll,
-        };
-        if (verificationError) result.message = verificationError;
-        else if (unexpectedChange) result.message = "選択していない科目にも変更が見つかりました。再実行せず TWINS で全学期の状態を確認してください。";
-        else if (journalFailed) result.message = "操作記録の保存に失敗しました。TWINS で状態を確認してから新しい差分を作成してください。";
-        else if (stopped || result.status === "partial") result.message = "途中で停止しました。結果を確認し、必要な変更は新しい差分から行ってください。";
-        try {
-          await record({ kind: "result", planId: body.id, result });
-        } catch {
-          result.status = "uncertain";
-          result.message = "最終結果の記録を保存できませんでした。再実行せず TWINS で状態を確認してください。";
-        }
-        return result;
-      });
+        throw error;
+      }
     },
   };
 }

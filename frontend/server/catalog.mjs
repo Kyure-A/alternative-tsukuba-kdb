@@ -176,3 +176,23 @@ export function normalizeSnapshot(raw, module, now) {
   });
   return { module, observedAt: now.toISOString(), entries };
 }
+
+export function normalizeSnapshots(raw, now) {
+  let payload;
+  try {
+    payload = typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch {
+    throw new BridgeError("invalid_snapshot", "TWINS の時間割データを読み取れませんでした。", 502);
+  }
+  const snapshots = payload?.snapshots;
+  if (
+    !snapshots || typeof snapshots !== "object" || Array.isArray(snapshots) ||
+    Object.keys(snapshots).length !== Object.keys(MODULES).length ||
+    Object.keys(MODULES).some((module) => !Object.hasOwn(snapshots, module))
+  ) {
+    throw new BridgeError("incomplete_snapshot", "TWINS の全モジュールを取得できませんでした。保存済みの時間割を保持します。", 502);
+  }
+  return Object.fromEntries(Object.keys(MODULES).map((module) => [
+    module, normalizeSnapshot(snapshots[module], module, now),
+  ]));
+}

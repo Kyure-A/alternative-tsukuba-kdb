@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, stat, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createCatalog, MODULES, normalizeSnapshot, additionFor } from "./catalog.mjs";
+import { createCatalog, MODULES, normalizeSnapshot, normalizeSnapshots, additionFor } from "./catalog.mjs";
 import { BridgeError } from "./runner.mjs";
 import { createTwinsService, createJournal } from "./service.mjs";
 
@@ -30,10 +30,10 @@ function fixture(options = {}) {
   const catalog = createCatalog([{ subject: options.rows ?? [row("A"), row("B"), row("C"), row("D")] }]);
   const run = async (operation) => {
     calls.push(operation);
-    if (operation.kind === "read") {
+    if (operation.kind === "read" || operation.kind === "read-all") {
       options.onRead?.(operation, calls);
       if (options.failRead?.(operation, calls)) throw new BridgeError("cli_failed", "fixture read failure", 502);
-      return JSON.stringify(state[operation.module]);
+      return JSON.stringify(operation.kind === "read-all" ? { snapshots: state } : state[operation.module]);
     }
     if (options.mutate) return options.mutate(operation, state);
     if (operation.kind === "add") state[operation.module].push(rawEntry(operation.code, operation.module));
@@ -49,23 +49,23 @@ function fixture(options = {}) {
     planTtlMs: options.planTtlMs,
   });
   const preview = (desiredCodes) => service.preview({ module: MODULE, academicYear: 2026, desiredByModule: desiredModules({ [MODULE]: desiredCodes }) });
-  const apply = (plan, actionKeys) => service.apply({ id: plan.id, actionKeys, confirmedAcademicYear: 2026 });
+  const apply = (plan, actionKeys) => service.apply({ id: plan.id, actionKeys, academicYear: 2026 });
   return { service, state, calls, journal, preview, apply };
 }
 
 test("fresh preview reads all modules and apply removes only explicitly selected course", async () => {
   const f = fixture();
   const plan = await f.preview(["C"]);
-  assert.equal(f.calls.length, 8);
+  assert.deepEqual(f.calls, [{ kind: "read-all" }]);
   assert.deepEqual(plan.additions.map((action) => action.code), ["C"]);
   assert.deepEqual(plan.removals.map((action) => action.code), ["A", "B"]);
   const result = await f.apply(plan, ["remove:A", "add:C"]);
   assert.equal(result.status, "verified");
-  assert.deepEqual(f.calls.filter((call) => call.kind !== "read").map((call) => `${call.kind}:${call.code}`), ["add:C", "remove:A"]);
+  assert.deepEqual(f.calls.filter((call) => call.kind === "add" || call.kind === "remove").map((call) => `${call.kind}:${call.code}`), ["add:C", "remove:A"]);
   assert.deepEqual(result.after.entries.map((entry) => entry.code), ["B", "C"]);
   assert.deepEqual(Object.keys(result.snapshots), Object.keys(MODULES));
   assert.deepEqual(result.snapshots[MODULE], result.after);
-  assert.equal(f.calls.filter((call) => call.kind === "read").length, 24);
+  assert.equal(f.calls.filter((call) => call.kind === "read-all").length, 3);
   assert.equal(f.journal[0].kind, "consumed");
   assert.equal(f.journal.at(-1).kind, "result");
 });
@@ -74,16 +74,16 @@ test("change in any module invalidates a preview before writing", async () => {
   const f = fixture();
   const plan = await f.preview(["A", "B", "C"]);
   f.state["spring-b"].push(rawEntry("D", "spring-b"));
-  await assert.rejects(f.apply(plan, ["add:C"]), { code: "stale_plan", status: 409 });
-  assert.equal(f.calls.filter((call) => call.kind !== "read").length, 0);
+  await assert.rejects(f.apply(plan, ["add:C"]), { code: "stale_plan", status: 409, mutationState: "not_started" });
+  assert.equal(f.calls.filter((call) => call.kind === "add" || call.kind === "remove").length, 0);
   await assert.rejects(f.apply(plan, ["add:C"]), { code: "expired_plan" });
 });
 
 test("missing preflight read consumes plan but never writes", async () => {
-  const f = fixture({ failRead: (_op, calls) => calls.length === 9 });
+  const f = fixture({ failRead: (_op, calls) => calls.length === 2 });
   const plan = await f.preview(["A", "B", "C"]);
-  await assert.rejects(f.apply(plan, ["add:C"]), { code: "preflight_failed", status: 409 });
-  assert.equal(f.calls.filter((call) => call.kind !== "read").length, 0);
+  await assert.rejects(f.apply(plan, ["add:C"]), { code: "preflight_failed", status: 409, mutationState: "not_started" });
+  assert.equal(f.calls.filter((call) => call.kind === "add" || call.kind === "remove").length, 0);
 });
 
 test("failure stops the batch, preserves unselected courses, and verifies actual partial state", async () => {
@@ -96,7 +96,7 @@ test("failure stops the batch, preserves unselected courses, and verifies actual
   assert.equal(result.status, "partial");
   assert.deepEqual(result.operations.map((operation) => operation.status), ["verified", "failed", "skipped"]);
   assert.deepEqual(result.after.entries.map((entry) => entry.code), ["A", "B", "C"]);
-  assert.deepEqual(f.calls.filter((call) => call.kind !== "read").map((call) => call.code), ["C", "D"]);
+  assert.deepEqual(f.calls.filter((call) => call.kind === "add" || call.kind === "remove").map((call) => call.code), ["C", "D"]);
   await assert.rejects(f.apply(plan, ["add:D"]), { code: "expired_plan" });
 });
 
@@ -109,7 +109,7 @@ test("write may complete before a CLI failure; independent reads establish actua
   const result = await f.apply(plan, ["add:C"]);
   assert.equal(result.status, "verified");
   assert.equal(result.operations[0].status, "verified");
-  assert.equal(f.calls.filter((call) => call.kind !== "read").length, 1);
+  assert.equal(f.calls.filter((call) => call.kind === "add" || call.kind === "remove").length, 1);
 });
 
 test("unverifiable write is uncertain and never automatically retried", async () => {
@@ -120,7 +120,7 @@ test("unverifiable write is uncertain and never automatically retried", async ()
   assert.equal(result.after, null);
   assert.equal(result.snapshots, null);
   assert.equal(result.operations[0].status, "uncertain");
-  assert.equal(f.calls.filter((call) => call.kind !== "read").length, 1);
+  assert.equal(f.calls.filter((call) => call.kind === "add" || call.kind === "remove").length, 1);
 });
 
 test("unexpected cross-module modification to unselected course marks outcome uncertain", async () => {
@@ -153,8 +153,8 @@ test("invented operations, duplicate codes, empty actions, wrong year and holida
   const plan = await f.preview(["C"]);
   await assert.rejects(f.apply(plan, ["remove:INVENTED"]), { code: "invalid_actions" });
   await assert.rejects(async () => f.apply(plan, []), { code: "no_actions" });
-  await assert.rejects(async () => f.service.apply({ id: plan.id, actionKeys: ["add:C"], confirmedAcademicYear: 2025 }), { code: "academic_year_mismatch" });
-  assert.equal(f.calls.filter((call) => call.kind !== "read").length, 0);
+  await assert.rejects(async () => f.service.apply({ id: plan.id, actionKeys: ["add:C"], academicYear: 2025 }), { code: "academic_year_mismatch" });
+  assert.equal(f.calls.filter((call) => call.kind === "add" || call.kind === "remove").length, 0);
 });
 
 test("plan expiration and JST academic-year rollover block edits", async () => {
@@ -173,7 +173,7 @@ test("journal must persist consumed plan before mutations", async () => {
   const f = fixture({ journal: async () => { throw new Error("disk full"); } });
   const plan = await f.preview(["A", "B", "C"]);
   await assert.rejects(f.apply(plan, ["add:C"]), { code: "journal_unavailable" });
-  assert.equal(f.calls.filter((call) => call.kind !== "read").length, 0);
+  assert.equal(f.calls.filter((call) => call.kind === "add" || call.kind === "remove").length, 0);
   await assert.rejects(f.apply(plan, ["add:C"]), { code: "expired_plan" });
 });
 
@@ -245,11 +245,11 @@ test("successful CLI exit without target state does not count as verified", asyn
 test("expiry during slow preflight prevents the first write", async () => {
   let now = new Date("2026-09-30T04:00:00Z");
   const f = fixture({ now: () => now, planTtlMs: 100, onRead: (_operation, calls) => {
-    if (calls.length === 16) now = new Date(now.getTime() + 101);
+    if (calls.length === 2) now = new Date(now.getTime() + 101);
   } });
   const plan = await f.preview(["A", "B", "C"]);
   await assert.rejects(f.apply(plan, ["add:C"]), { code: "expired_plan" });
-  assert.equal(f.calls.filter((call) => call.kind !== "read").length, 0);
+  assert.equal(f.calls.filter((call) => call.kind === "add" || call.kind === "remove").length, 0);
 });
 
 test("failure to persist action start prevents its command and reports uncertainty", async () => {
@@ -260,7 +260,7 @@ test("failure to persist action start prevents its command and reports uncertain
   const result = await f.apply(plan, ["add:C"]);
   assert.equal(result.status, "uncertain");
   assert.equal(result.operations[0].status, "skipped");
-  assert.equal(f.calls.filter((call) => call.kind !== "read").length, 0);
+  assert.equal(f.calls.filter((call) => call.kind === "add" || call.kind === "remove").length, 0);
 });
 
 
@@ -272,13 +272,52 @@ test("all-module import returns all eight snapshots atomically in one serialized
   assert.deepEqual(Object.keys(result.snapshots), Object.keys(MODULES));
   assert.deepEqual(result.snapshots[MODULE].entries.map((entry) => entry.code), ["A", "B"]);
   await single;
-  assert.deepEqual(f.calls.map((call) => call.module), [...Object.keys(MODULES), "spring-a"]);
+  assert.deepEqual(f.calls, [{ kind: "read-all" }, { kind: "read", module: "spring-a" }]);
 });
 
 test("all-module import rejects as a whole when one module cannot be read", async () => {
-  const f = fixture({ failRead: (operation) => operation.module === "autumn-b" });
+  const f = fixture({ failRead: (operation) => operation.kind === "read-all" });
   await assert.rejects(f.service.timetables(), { code: "cli_failed" });
-  assert.equal(f.calls.at(-1).module, "autumn-b");
+  assert.deepEqual(f.calls, [{ kind: "read-all" }]);
+});
+
+test("batch normalization requires every module even when its timetable is empty", () => {
+  const now = new Date("2026-09-30T04:00:00Z");
+  const snapshots = Object.fromEntries(Object.keys(MODULES).map((module) => [module, []]));
+  assert.deepEqual(Object.keys(normalizeSnapshots({ snapshots }, now)), Object.keys(MODULES));
+  const missing = { ...snapshots };
+  delete missing.summer;
+  for (const raw of [{ snapshots: missing }, { snapshots: { ...snapshots, unexpected: [] } }, { snapshots: [] }, {}]) {
+    assert.throws(() => normalizeSnapshots(raw, now), { code: "incomplete_snapshot" });
+  }
+  assert.throws(() => normalizeSnapshots("not json", now), { code: "invalid_snapshot" });
+  assert.throws(() => normalizeSnapshots({ snapshots: { ...snapshots, "spring-a": [rawEntry("A", "autumn-a")] } }, now), { code: "invalid_snapshot" });
+});
+
+test("incomplete batch during preflight is a known non-mutation and preserves the reason", async () => {
+  let reads = 0;
+  let writes = 0;
+  const snapshots = Object.fromEntries(Object.keys(MODULES).map((module) => [module, []]));
+  const service = createTwinsService({
+    run: async ({ kind }) => {
+      if (kind !== "read-all") { writes++; throw new Error("Unexpected mutation"); }
+      reads++;
+      return JSON.stringify({ snapshots: reads === 1 ? snapshots : {} });
+    },
+    catalog: createCatalog([{ subject: [row("C")] }]),
+    journal: async () => {},
+    now: () => new Date("2026-09-30T04:00:00Z"),
+  });
+  const plan = await service.preview({ module: MODULE, academicYear: 2026, desiredByModule: desiredModules({ [MODULE]: ["C"] }) });
+  await assert.rejects(service.apply({ id: plan.id, actionKeys: ["add:C"], academicYear: 2026 }), (error) => {
+    assert.equal(error.code, "preflight_failed");
+    assert.equal(error.mutationState, "not_started");
+    assert.match(error.message, /全モジュールを取得できませんでした/);
+    assert.match(error.message, /履修は変更していません/);
+    assert.doesNotMatch(error.message, /結果が不明/);
+    return true;
+  });
+  assert.equal(writes, 0);
 });
 
 const globalPreview = (f, overrides) => f.service.preview({
@@ -313,7 +352,7 @@ test("global preview deduplicates course-level additions and removals across mod
   assert.deepEqual(plan.removals.map((action) => [action.code, action.module]), [["A", "spring-a"], ["B", "autumn-c"]]);
   const result = await f.apply(plan, [...plan.removals, ...plan.additions].map((action) => action.key));
   assert.equal(result.status, "verified");
-  assert.deepEqual(f.calls.filter((call) => call.kind !== "read").map((call) => call.key), ["add:D", "add:C", "remove:A", "remove:B"]);
+  assert.deepEqual(f.calls.filter((call) => call.kind === "add" || call.kind === "remove").map((call) => call.key), ["add:D", "add:C", "remove:A", "remove:B"]);
   assert.deepEqual(result.snapshots["spring-b"].entries.map((entry) => entry.code), ["D"]);
   assert.deepEqual(result.snapshots["autumn-b"].entries.map((entry) => entry.code), ["C"]);
 });
@@ -369,6 +408,6 @@ test("global apply rejects a stale module outside the active viewport before any
   const f = fixture();
   const plan = await globalPreview(f, { "autumn-a": ["A", "B", "C"] });
   f.state["spring-c"] = [rawEntry("D", "spring-c")];
-  await assert.rejects(f.apply(plan, ["add:C"]), { code: "stale_plan", status: 409 });
-  assert.equal(f.calls.filter((call) => call.kind !== "read").length, 0);
+  await assert.rejects(f.apply(plan, ["add:C"]), { code: "stale_plan", status: 409, mutationState: "not_started" });
+  assert.equal(f.calls.filter((call) => call.kind === "add" || call.kind === "remove").length, 0);
 });

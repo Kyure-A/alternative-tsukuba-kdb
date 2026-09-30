@@ -1,5 +1,12 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import { z } from "zod";
+
+import {
+  BOOKMARKS_KEY,
+  BOOKMARKS_VERSION,
+  type BookmarkSubject,
+  type Bookmarks,
+  bookmarksSchema,
+} from "./bookmarkStorage";
 
 import { CURRENT_YEAR, kdb, type Subject } from "./subject";
 import {
@@ -15,28 +22,8 @@ import {
   syncTwinsCourseBaseline,
   type TwinsModule,
   type TwinsSnapshot,
-  twinsBaselineSchema,
   twinsModuleFromTermCode,
 } from "./twins";
-
-const BOOKMARKS_KEY = "kdb_bookmarks";
-const BOOKMARKS_VERSION = 1;
-
-const bookmarkSubjectSchema = z.object({
-  year: z.number(),
-  ta: z.boolean(),
-  memos: z.array(z.string().nullable()),
-});
-
-const bookmarksSchema = z.object({
-  version: z.literal(BOOKMARKS_VERSION),
-  subjects: z.record(z.string(), bookmarkSubjectSchema),
-  memoHeaders: z.array(z.string().nullable()),
-  twinsBaseline: twinsBaselineSchema.optional(),
-});
-
-type BookmarkSubject = z.infer<typeof bookmarkSubjectSchema>;
-type Bookmarks = z.infer<typeof bookmarksSchema>;
 
 const createEmptyBookmarkSubject = (): BookmarkSubject => {
   return { year: CURRENT_YEAR, ta: false, memos: [""] };

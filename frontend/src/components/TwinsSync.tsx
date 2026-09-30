@@ -38,7 +38,6 @@ export default function TwinsSync({
   module,
 }: Props) {
   const [selected, setSelected] = useState<string[]>([]);
-  const [confirmed, setConfirmed] = useState(false);
   const preview = twins.preview;
   const exceptional = Object.values(twins.snapshots).flatMap((item) =>
     item.entries.filter((entry) => {
@@ -61,7 +60,6 @@ export default function TwinsSync({
     preview && module && twins.reviewKey === twinsPlanKey(desired);
   useEffect(() => {
     setSelected(preview?.additions.map((action) => action.key) ?? []);
-    setConfirmed(false);
   }, [preview]);
 
   const toggle = (key: string) => {
@@ -70,7 +68,6 @@ export default function TwinsSync({
         ? previous.filter((item) => item !== key)
         : [...previous, key],
     );
-    setConfirmed(false);
   };
 
   return (
@@ -157,21 +154,11 @@ export default function TwinsSync({
               </details>
             )}
             {preview.additions.length + preview.removals.length > 0 && (
-              <>
-                <p>
-                  <small>
-                    追加・取消は科目単位で、複数モジュールにまたがる授業にも反映されます。
-                  </small>
-                </p>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={confirmed}
-                    onChange={(event) => setConfirmed(event.target.checked)}
-                  />
-                  TWINS の {CURRENT_YEAR} 年度と、選択した変更内容を確認した
-                </label>
-              </>
+              <p>
+                <small>
+                  追加・取消は科目単位で、複数モジュールにまたがる授業にも反映されます。
+                </small>
+              </p>
             )}
           </>
         )}
@@ -225,7 +212,6 @@ export default function TwinsSync({
               type="button"
               data-primary="true"
               disabled={
-                !confirmed ||
                 selected.length === 0 ||
                 Boolean(twins.busy) ||
                 Date.parse(preview.expiresAt) <= Date.now()

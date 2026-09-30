@@ -1,0 +1,42 @@
+{
+  "measuredAt": "2026-09-30T04:05:24.134Z",
+  "beforeFlake": "github:Kyure-A/twins-cli/13367cec6fc82ee8ba07c7289c6b78c1657446ab",
+  "afterFlake": "github:Kyure-A/twins-cli/5e07a38f5e1da91658d5bce8afb67b6bbc7a8250",
+  "method": "Canonical GitHub flakes, warmed build, sequential authenticated reads only. Compare all normalized entries without retaining any timetable payload.",
+  "beforeSeconds": 9.181,
+  "batchTrials": [
+    {
+      "seconds": 5.007,
+      "modules": 8,
+      "matches": {
+        "spring-a": true,
+        "spring-b": true,
+        "spring-c": true,
+        "summer": true,
+        "autumn-a": true,
+        "autumn-b": true,
+        "autumn-c": true,
+        "spring-break": true
+      }
+    },
+    {
+      "seconds": 4.505,
+      "modules": 8,
+      "matches": {
+        "spring-a": true,
+        "spring-b": true,
+        "spring-c": true,
+        "summer": true,
+        "autumn-a": true,
+        "autumn-b": true,
+        "autumn-c": true,
+        "spring-break": true
+      }
+    }
+  ],
+  "deployedHttpTrial": {
+    "status": 200,
+    "seconds": 4.54,
+    "modules": 8
+  }
+}

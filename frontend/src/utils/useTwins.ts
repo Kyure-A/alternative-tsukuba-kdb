@@ -12,6 +12,11 @@ import {
   type TwinsSnapshot,
 } from "./twins";
 import { clearTwinsCache, readTwinsCache, saveTwinsCache } from "./twinsCache";
+import {
+  handleTwinsApplyFailure,
+  requestTwins as request,
+  type TwinsApplyFailure,
+} from "./twinsRequest";
 
 export const twinsPlanKey = (
   desiredByModule: Partial<Record<TwinsModule, string[]>>,
@@ -31,33 +36,6 @@ const snapshotCodes = (
   ),
 ];
 
-async function request(path: string, body?: unknown): Promise<unknown> {
-  const response = await fetch(`/api/twins/${path}`, {
-    method: body === undefined ? "GET" : "POST",
-    cache: "no-store",
-    credentials: "same-origin",
-    headers:
-      body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  let result: unknown;
-  try {
-    result = await response.json();
-  } catch {
-    throw new Error(
-      "TWINS 連携サーバーに接続できません。ローカル版から開いてください。",
-    );
-  }
-  if (!response.ok) {
-    const message = (result as { error?: { message?: unknown } })?.error
-      ?.message;
-    throw new Error(
-      typeof message === "string" ? message : "TWINS の取得に失敗しました。",
-    );
-  }
-  return result;
-}
-
 export const useTwins = () => {
   const [initialCache] = useState(() =>
     readTwinsCache(localStorage, CURRENT_YEAR),
@@ -70,6 +48,9 @@ export const useTwins = () => {
   const [result, setResult] = useState<TwinsApplyResult | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [applyFailure, setApplyFailure] = useState<TwinsApplyFailure | null>(
+    null,
+  );
   const [importCodes, setImportCodes] = useState<string[] | null>(
     initialCache ? snapshotCodes(initialCache) : null,
   );
@@ -81,6 +62,7 @@ export const useTwins = () => {
   const reload = useCallback(async () => {
     setBusy("TWINS の時間割を取得中…");
     setError(null);
+    setApplyFailure(null);
     setPreview(null);
     try {
       const data = (await request("timetables")) as {
@@ -126,8 +108,9 @@ export const useTwins = () => {
     academicYear: number,
     desiredByModule: Partial<Record<TwinsModule, string[]>>,
   ) => {
-    setBusy("全モジュールの登録状況を照合中… 数分かかることがあります。");
+    setBusy("TWINS の登録状況を確認中…");
     setError(null);
+    setApplyFailure(null);
     setPreview(null);
     setResult(null);
     try {
@@ -147,37 +130,52 @@ export const useTwins = () => {
     }
   };
 
-  const apply = async (actionKeys: string[], confirmedAcademicYear: number) => {
+  const apply = async (actionKeys: string[], academicYear: number) => {
     if (!preview) return;
     const id = preview.id;
     const module = preview.before.module;
     setPreview(null);
     setError(null);
+    setApplyFailure(null);
+    setResult(null);
     setBusy(
       "TWINS に反映し、全モジュールを再照会しています。画面を閉じずにお待ちください。",
     );
     try {
       const next = parseTwinsApplyResult(
-        await request("apply", { id, actionKeys, confirmedAcademicYear }),
+        await request("apply", { id, actionKeys, academicYear }),
         module,
       );
       setSnapshots(
         next.snapshots ??
           (next.after ? { [next.after.module]: next.after } : {}),
       );
-      if (next.snapshots) {
-        saveTwinsCache(localStorage, CURRENT_YEAR, next.snapshots);
-        setImportCodes(snapshotCodes(next.snapshots));
-      } else {
-        clearTwinsCache(localStorage);
-      }
       setResult(next);
+      setImportCodes(next.snapshots ? snapshotCodes(next.snapshots) : null);
+      try {
+        if (next.snapshots) {
+          saveTwinsCache(localStorage, CURRENT_YEAR, next.snapshots);
+        } else {
+          clearTwinsCache(localStorage);
+        }
+      } catch {
+        try {
+          clearTwinsCache(localStorage);
+        } catch {
+          // Keep the received result even when browser storage is unavailable.
+        }
+        setError("取得結果のブラウザー保存に失敗しました。");
+      }
     } catch (cause) {
-      clearTwinsCache(localStorage);
-      setSnapshots({});
-      setError(
-        `${cause instanceof Error ? cause.message : "反映結果を受信できませんでした。"} 結果が不明な場合は TWINS を読み直して確認してください。自動再送はしません。`,
+      const failure = handleTwinsApplyFailure(cause, () =>
+        clearTwinsCache(localStorage),
       );
+      if (failure.mutationState !== "not_started") {
+        setSnapshots({});
+        setImportCodes(null);
+      }
+      setApplyFailure(failure);
+      setError(failure.message);
     } finally {
       setBusy(null);
     }
@@ -191,6 +189,7 @@ export const useTwins = () => {
     result,
     busy,
     error,
+    applyFailure,
     importCodes,
     reload,
     review,

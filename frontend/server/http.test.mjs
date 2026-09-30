@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { get } from "node:http";
 import { createBridgeServer, isAllowedRequest } from "./http.mjs";
+import { BridgeError } from "./runner.mjs";
 
 async function fixture(t) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "twins-http-"));
@@ -21,7 +22,7 @@ async function fixture(t) {
     await new Promise((resolve) => server.close(resolve));
     await rm(directory, { recursive: true, force: true });
   });
-  return { origin, calls };
+  return { origin, calls, service };
 }
 
 test("loopback Host, exact Origin and fetch-site guards reject remote and rebinding requests", () => {
@@ -54,12 +55,32 @@ test("same-origin JSON API works, stays no-store, and rejects other request type
   assert.equal(text.status, 415);
   const invalid = await fetch(`${f.origin}/api/twins/apply`, { method: "POST", headers: { "Content-Type": "application/json", Origin: f.origin }, body: "{" });
   assert.equal(invalid.status, 400);
+  assert.equal((await invalid.json()).error.mutationState, "not_started");
   const tooLarge = await fetch(`${f.origin}/api/twins/apply`, { method: "POST", headers: { "Content-Type": "application/json", Origin: f.origin }, body: `"${"x".repeat(33 * 1024)}"` });
   assert.equal(tooLarge.status, 413);
   assert.equal(f.calls.length, 1);
   const valid = await fetch(`${f.origin}/api/twins/preview`, { method: "POST", headers: { "Content-Type": "application/json", Origin: f.origin }, body: '{"module":"autumn-a"}' });
   assert.equal(valid.status, 200);
   assert.deepEqual(f.calls.at(-1), { name: "preview", value: { module: "autumn-a" } });
+});
+
+test("apply errors distinguish a known preflight rejection from an ambiguous server failure", async (t) => {
+  const f = await fixture(t);
+  const apply = () => fetch(`${f.origin}/api/twins/apply`, {
+    method: "POST", headers: { "Content-Type": "application/json", Origin: f.origin }, body: "{}",
+  });
+  f.service.apply = async () => {
+    const error = new BridgeError("preflight_failed", "履修は変更していません。", 409);
+    error.mutationState = "not_started";
+    throw error;
+  };
+  assert.deepEqual((await (await apply()).json()).error, {
+    code: "preflight_failed", message: "履修は変更していません。", mutationState: "not_started",
+  });
+  f.service.apply = async () => { throw new Error("private error detail"); };
+  const unknown = (await (await apply()).json()).error;
+  assert.equal(unknown.mutationState, "unknown");
+  assert.doesNotMatch(unknown.message, /private/);
 });
 
 test("only built frontend files are served, with HTTP Host enforced", async (t) => {
