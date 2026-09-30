@@ -1,0 +1,45 @@
+{
+  "measuredAt": "2026-09-30T12:50:27+09:00",
+  "implementationCommit": "d0917d78e3e24cc2dfc9312db44643d4b51548ff",
+  "twinsCliRevision": "13367cec6fc82ee8ba07c7289c6b78c1657446ab",
+  "method": {
+    "clock": "node:perf_hooks performance.now",
+    "http": "GET http://127.0.0.1:4317/api/twins/timetables through JSON body parsing; excludes browser rendering",
+    "instrumentation": "Wrap the unchanged createRunner; call unchanged createTwinsService.timetables with a journal that rejects writes",
+    "startupControl": "Three sequential nix run invocations of the pinned CLI with --help; stdout/stderr discarded",
+    "conditions": "Existing authenticated session and already-built Nix store outputs; all authenticated measurements sequential",
+    "privacy": "Only elapsed times and success/module counts retained; no timetable payload or credentials recorded"
+  },
+  "httpTrials": [
+    { "status": 200, "modules": 8, "headersSeconds": 8.755, "totalSeconds": 8.756 },
+    { "status": 200, "modules": 8, "totalSeconds": 8.783 }
+  ],
+  "instrumentedTrial": {
+    "totalSeconds": 8.403,
+    "cliSeconds": 8.402,
+    "serviceOverheadMilliseconds": 1.36,
+    "moduleSeconds": {
+      "spring-a": 1.093,
+      "spring-b": 1.139,
+      "spring-c": 1.016,
+      "summer": 0.930,
+      "autumn-a": 1.083,
+      "autumn-b": 1.189,
+      "autumn-c": 1.012,
+      "spring-break": 0.940
+    }
+  },
+  "startupControlMilliseconds": [202.85, 162.78, 161.05],
+  "sourceFindings": [
+    "server/service.mjs readAll awaits all eight modules serially",
+    "server/runner.mjs launches nix run once for each module",
+    "Pinned twins-cli lib/twins.ml:300-312 starts a registration flow and then requests the selected module: two GET navigation chains per invocation, plus redirects",
+    "Pinned twins-cli bin/main.ml:177-207 requires one module; it has no all-module batch command"
+  ],
+  "limits": [
+    "Small observational sample; no cold-build or login-recovery timing",
+    "Help startup is a control, not a direct breakdown of each real timetable command",
+    "Network/server time and cookie I/O were not separately instrumented",
+    "No production implementation changes or registration mutations were performed"
+  ]
+}
