@@ -42,7 +42,9 @@ export const createTimeslotTable = (value: string): TimeslotTable => {
   let dayArray: number[] = [];
 
   // ｛曜日 + 数字（ハイフン含む）｝がコンマまたは空白区切りで繰り返される
-  const slotStrArray = value.split(/[\s,]+/).filter((slotStr) => slotStr !== "");
+  const slotStrArray = value
+    .split(/[\s,]+/)
+    .filter((slotStr) => slotStr !== "");
   for (const slotStr of slotStrArray) {
     // 曜日を取得
     const dayStr = slotStr.replace(/[0-9-]/g, "");

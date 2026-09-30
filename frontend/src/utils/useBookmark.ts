@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { z } from "zod";
 
 import { CURRENT_YEAR, kdb, type Subject } from "./subject";
@@ -7,6 +7,16 @@ import {
   fillTimetable,
   getTimeslotsLength,
 } from "./timetable";
+import {
+  getDesiredTwinsCodes,
+  getTwinsTimeslotOverrides,
+  mergeTwinsCourses,
+  syncTwinsCourseBaseline,
+  type TwinsModule,
+  type TwinsSnapshot,
+  twinsBaselineSchema,
+  twinsModuleFromTermCode,
+} from "./twins";
 
 const BOOKMARKS_KEY = "kdb_bookmarks";
 const BOOKMARKS_VERSION = 1;
@@ -21,6 +31,7 @@ const bookmarksSchema = z.object({
   version: z.literal(BOOKMARKS_VERSION),
   subjects: z.record(z.string(), bookmarkSubjectSchema),
   memoHeaders: z.array(z.string().nullable()),
+  twinsBaseline: twinsBaselineSchema.optional(),
 });
 
 type BookmarkSubject = z.infer<typeof bookmarkSubjectSchema>;
@@ -81,8 +92,16 @@ const saveBookmarks = (bookmarks: Bookmarks) => {
 export const useBookmark = (
   timetableTermCode: number,
   setTimetableTermCode: React.Dispatch<React.SetStateAction<number>>,
+  twinsSnapshot?: TwinsSnapshot,
 ) => {
   const [bookmarks, setBookmarks] = useState<Bookmarks>(localStorageBookmarks);
+  const bookmarksRef = useRef(bookmarks);
+
+  const persistBookmarks = useCallback((nextBookmarks: Bookmarks) => {
+    saveBookmarks(nextBookmarks);
+    bookmarksRef.current = nextBookmarks;
+    setBookmarks(nextBookmarks);
+  }, []);
 
   // 年度ごとの単位数の合計
   const yearCredits = useMemo(() => {
@@ -114,6 +133,10 @@ export const useBookmark = (
   ] = useMemo(() => {
     const table = createEmptyTimeslotTable();
     const subjectTable = fillTimetable<Subject[]>([]);
+    const twinsTimeslots = getTwinsTimeslotOverrides(
+      twinsSnapshot,
+      twinsModuleFromTermCode(timetableTermCode),
+    );
     let credits = 0;
     let timeslots = 0;
 
@@ -130,11 +153,13 @@ export const useBookmark = (
       const termIndex = subject.termCodes.findIndex((codes) =>
         codes.includes(timetableTermCode),
       );
-      if (termIndex === -1) {
+      const observedTimeslots = twinsTimeslots[code];
+      if (termIndex === -1 && !observedTimeslots) {
         continue;
       }
 
-      const subjectTimeslotTable = subject.timeslotTables[termIndex];
+      const subjectTimeslotTable =
+        observedTimeslots ?? subject.timeslotTables[termIndex];
       if (subjectTimeslotTable) {
         for (let day = 0; day < table.length; day++) {
           for (let period = 0; period < table[day].length; period++) {
@@ -152,7 +177,7 @@ export const useBookmark = (
       }
     }
     return [table, subjectTable, credits, timeslots];
-  }, [bookmarks, timetableTermCode]);
+  }, [bookmarks, timetableTermCode, twinsSnapshot]);
 
   const memoLength = 9;
 
@@ -219,7 +244,7 @@ export const useBookmark = (
 
   const switchBookmark = useCallback(
     (subjectCode: string) => {
-      const newBookmarks = structuredClone(bookmarks);
+      const newBookmarks = structuredClone(bookmarksRef.current);
       if (subjectCode in newBookmarks.subjects) {
         delete newBookmarks.subjects[subjectCode];
       } else {
@@ -233,17 +258,16 @@ export const useBookmark = (
           setTimetableTermCode(termCode);
         }
       }
-      setBookmarks(newBookmarks);
-      saveBookmarks(newBookmarks);
+      persistBookmarks(newBookmarks);
     },
-    [bookmarks, setTimetableTermCode],
+    [persistBookmarks, setTimetableTermCode],
   );
 
   const updateBookmark = (
     subjectCode: string,
     value: Partial<BookmarkSubject>,
   ) => {
-    const newBookmarks = structuredClone(bookmarks);
+    const newBookmarks = structuredClone(bookmarksRef.current);
     const bookmarkSubject = newBookmarks.subjects[subjectCode];
     if (!bookmarkSubject) {
       return;
@@ -257,8 +281,7 @@ export const useBookmark = (
     if (value.memos !== undefined) {
       bookmarkSubject.memos = value.memos;
     }
-    setBookmarks(newBookmarks);
-    saveBookmarks(newBookmarks);
+    persistBookmarks(newBookmarks);
   };
 
   const clearBookmarks = useCallback(() => {
@@ -266,27 +289,98 @@ export const useBookmark = (
       "すべてのお気に入りの科目が削除されます。よろしいですか？",
     );
     if (ok) {
-      localStorage.removeItem(BOOKMARKS_KEY);
-      setBookmarks(createEmptyBookmarks());
+      persistBookmarks({
+        ...createEmptyBookmarks(),
+        twinsBaseline: bookmarksRef.current.twinsBaseline,
+      });
     }
-  }, []);
+  }, [persistBookmarks]);
 
   const updateMemoHeaders = useCallback(
     (memoHeaders: (string | null)[]) => {
-      const newBookmarks = structuredClone(bookmarks);
+      const newBookmarks = structuredClone(bookmarksRef.current);
       newBookmarks.memoHeaders = memoHeaders;
-      setBookmarks(newBookmarks);
-      saveBookmarks(newBookmarks);
+      persistBookmarks(newBookmarks);
     },
-    [bookmarks],
+    [persistBookmarks],
   );
 
   const exportToTwinte = useCallback(() => {
     // cf. https://github.com/twin-te/twinte-front/pull/529
     const baseUrl = "https://app.twinte.net/import?codes=";
-    const codes = Object.keys(bookmarks.subjects).filter(key => {return bookmarks.subjects[key].year === CURRENT_YEAR;});
+    const codes = Object.keys(bookmarks.subjects).filter((key) => {
+      return bookmarks.subjects[key].year === CURRENT_YEAR;
+    });
     window.open(baseUrl + codes.join(","));
   }, [bookmarks.subjects]);
+
+  const getTwinsPlanCodes = useCallback(
+    (module: TwinsModule, observedCodes: readonly string[] = []) =>
+      getDesiredTwinsCodes(
+        bookmarks.subjects,
+        kdb.subjectMap,
+        module,
+        CURRENT_YEAR,
+        observedCodes,
+      ),
+    [bookmarks.subjects],
+  );
+
+  const importTwinsCourses = useCallback(
+    (codes: string[]) => {
+      const currentBookmarks = bookmarksRef.current;
+      const { subjects, report } = mergeTwinsCourses(
+        currentBookmarks.subjects,
+        codes,
+        kdb.subjectMap,
+        CURRENT_YEAR,
+      );
+      if (report.added.length > 0) {
+        persistBookmarks({ ...currentBookmarks, subjects });
+      }
+      return {
+        added: report.added,
+        existing: report.alreadyPresent,
+        skipped: [
+          ...report.unknown,
+          ...report.conflicts.map(({ code }) => code),
+        ],
+        unknown: report.unknown,
+        conflicts: report.conflicts,
+      };
+    },
+    [persistBookmarks],
+  );
+
+  const syncTwinsCourses = useCallback(
+    (codes: string[]) => {
+      const currentBookmarks = bookmarksRef.current;
+      const { subjects, baseline, report } = syncTwinsCourseBaseline(
+        currentBookmarks.subjects,
+        currentBookmarks.twinsBaseline,
+        codes,
+        kdb.subjectMap,
+        CURRENT_YEAR,
+      );
+      // Save subjects and the observation baseline together, including empty reads.
+      persistBookmarks({
+        ...currentBookmarks,
+        subjects,
+        twinsBaseline: baseline,
+      });
+      return {
+        added: report.added,
+        existing: report.alreadyPresent,
+        skipped: [
+          ...report.unknown,
+          ...report.conflicts.map(({ code }) => code),
+        ],
+        unknown: report.unknown,
+        conflicts: report.conflicts,
+      };
+    },
+    [persistBookmarks],
+  );
 
   return {
     bookmarkTimeslotTable,
@@ -306,5 +400,8 @@ export const useBookmark = (
     clearBookmarks,
     updateMemoHeaders,
     exportToTwinte,
+    getTwinsPlanCodes,
+    importTwinsCourses,
+    syncTwinsCourses,
   };
 };

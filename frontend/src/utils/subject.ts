@@ -86,7 +86,10 @@ export class Subject {
     // 時限
     // タームとコマのグループ長は稀に一致しない場合がある
     // タームのグループが 1 つしかない場合は、すべてのコマを統合
-    for (const str of splitTimeslotGroups(this.timeslotStr, this._termCodes.length)) {
+    for (const str of splitTimeslotGroups(
+      this.timeslotStr,
+      this._termCodes.length,
+    )) {
       this._timeslotTables.push(createTimeslotTable(str));
       this.concentration ||= str.includes("集中");
       this.negotiable ||= str.includes("応談");
@@ -162,6 +165,12 @@ export class Subject {
           season = char;
         }
         if (season) {
+          // 「春学期」「秋学期」はその学期の A〜C をすべて含む
+          if (char === "学" && nextChar === "期" && isNormalSeason(season)) {
+            for (const module of modules) {
+              group.push(getTermCode(season, module));
+            }
+          }
           // ABC ターム
           if (isModule(char) && isNormalSeason(season)) {
             const no = getTermCode(season, char);

@@ -96,7 +96,7 @@ const Main = React.memo(
         <Wrapper>
           {displaysPlan ? (
             <CoursePlan
-              subjects={subjects}
+              subjects={filteredSubjects}
               hasMore={hasMore}
               loadingRef={loadingDesktopRef}
               usedBookmark={usedBookmark}

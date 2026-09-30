@@ -7,6 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
+    "twins": "npm run build && node server/index.mjs",
+    "twins:serve": "node server/index.mjs",
+    "test": "node --experimental-strip-types --test tests/*.test.ts server/*.test.mjs",
     "check": "biome check --write .",
     "check:ci": "biome ci ."
   },

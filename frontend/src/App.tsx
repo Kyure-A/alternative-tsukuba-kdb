@@ -6,14 +6,17 @@ import Header from "./components/Header/Header";
 import Main from "./components/Main/Main";
 import Syllabi from "./components/Syllabi";
 import Timetable from "./components/Timetable/Index";
+import TwinsSync from "./components/TwinsSync";
 import {
   createSearchOptions,
   type SearchOptions,
   searchSubjects,
 } from "./utils/search";
-import { kdb, type Subject } from "./utils/subject";
+import { CURRENT_YEAR, kdb, type Subject } from "./utils/subject";
+import { twinsModuleFromTermCode } from "./utils/twins";
 import { useBookmark } from "./utils/useBookmark";
 import { useClassroom } from "./utils/useClassroom";
+import { useTwins } from "./utils/useTwins";
 
 const globalStyle = css`
   html,
@@ -58,10 +61,36 @@ const App = () => {
     null,
   );
 
-  const usedBookmark = useBookmark(timetableTermCode, setTimetableTermCode);
+  const twins = useTwins();
+  const twinsModule = twinsModuleFromTermCode(timetableTermCode);
+  const twinsSnapshot = twinsModule ? twins.snapshots[twinsModule] : undefined;
+  const usedBookmark = useBookmark(
+    timetableTermCode,
+    setTimetableTermCode,
+    twinsSnapshot,
+  );
   const { bookmarkTimeslotTable, bookmarksHas } = usedBookmark;
 
   const usedClassroom = useClassroom();
+  const [syncOpen, setSyncOpen] = useState(false);
+  const { syncTwinsCourses } = usedBookmark;
+
+  useEffect(() => {
+    if (twins.importCodes) syncTwinsCourses(twins.importCodes);
+  }, [twins.importCodes, syncTwinsCourses]);
+
+  const openSync = () => {
+    setSyncOpen(true);
+    if (twinsModule)
+      void twins.review(
+        twinsModule,
+        CURRENT_YEAR,
+        usedBookmark.getTwinsPlanCodes(
+          twinsModule,
+          twinsSnapshot?.entries.map((entry) => entry.code),
+        ),
+      );
+  };
 
   // debounce 時間
   const DEBOUNCE_TIME = 100;
@@ -112,6 +141,17 @@ const App = () => {
         termCode={timetableTermCode}
         usedBookmark={usedBookmark}
         setTermCode={setTimetableTermCode}
+        twinsSnapshot={twinsSnapshot}
+        onSync={twins.available ? openSync : undefined}
+        syncBusy={Boolean(twins.busy)}
+        syncError={twins.error}
+      />
+      <TwinsSync
+        isOpen={syncOpen}
+        onClose={() => setSyncOpen(false)}
+        twins={twins}
+        usedBookmark={usedBookmark}
+        module={twinsModule}
       />
       <Syllabi
         subjectCode={syllabiSubjectCode}

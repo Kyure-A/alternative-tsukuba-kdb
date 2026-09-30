@@ -8,8 +8,9 @@ import {
   mobileWidth,
   shadow,
 } from "@/utils/style";
-import { CURRENT_YEAR, type Subject } from "@/utils/subject";
+import { CURRENT_YEAR, kdb, type Subject } from "@/utils/subject";
 import { daysofweek, maxPeriod } from "@/utils/timetable";
+import { projectTwinsTimetable, type TwinsSnapshot } from "@/utils/twins";
 import type { useBookmark } from "@/utils/useBookmark";
 import Header from "./Header";
 
@@ -177,6 +178,20 @@ const Link = styled.a<{ caution?: boolean }>`
   }
 `;
 
+const SyncButton = styled.button`
+  flex-grow: 1;
+  border: 0;
+  border-right: 1px solid #eee;
+  padding: 0 5px;
+  background: transparent;
+  color: ${colorPurpleDark};
+  font: inherit;
+  font-size: 13px;
+  line-height: 16px;
+  cursor: pointer;
+  &:disabled { opacity: .6; cursor: default; }
+`;
+
 const times = [
   ["8:40", "9:55"],
   ["10:10", "11:25"],
@@ -190,10 +205,22 @@ interface TimetableProps {
   termCode: number;
   usedBookmark: ReturnType<typeof useBookmark>;
   setTermCode: React.Dispatch<React.SetStateAction<number>>;
+  twinsSnapshot?: TwinsSnapshot;
+  onSync?: () => void;
+  syncBusy: boolean;
+  syncError: string | null;
 }
 
 const TimetableElement = React.memo(
-  ({ usedBookmark, termCode, setTermCode }: TimetableProps) => {
+  ({
+    usedBookmark,
+    termCode,
+    setTermCode,
+    twinsSnapshot,
+    onSync,
+    syncBusy,
+    syncError,
+  }: TimetableProps) => {
     const {
       bookmarkSubjectTable,
       yearCredits,
@@ -207,6 +234,7 @@ const TimetableElement = React.memo(
     const isMobile = useMedia(`(width < ${mobileWidth})`);
 
     const [opened, setOpened] = useState(!isMobile);
+    const twinsTable = projectTwinsTimetable(twinsSnapshot ?? null).table;
 
     const getColor = (subject: Subject, no: number) => {
       // 実施形態と重なりで色を決定
@@ -255,6 +283,31 @@ const TimetableElement = React.memo(
                 </Day>
                 {[...Array(maxPeriod)].map((_, period) => (
                   <Item key={period}>
+                    {twinsTable[dayi][period]
+                      .filter((entry) => {
+                        const bookmark = usedBookmark.getBookmarkSubject(
+                          entry.code,
+                        );
+                        return (
+                          !kdb.subjectMap[entry.code] ||
+                          (bookmark && bookmark.year !== CURRENT_YEAR)
+                        );
+                      })
+                      .map((entry, index) => (
+                        <SubjectTile
+                          background="#dcefe9"
+                          top={index * 2}
+                          key={entry.code}
+                          title={entry.description}
+                        >
+                          <span>
+                            {entry.code}
+                            <br />
+                            {kdb.subjectMap[entry.code]?.name ??
+                              entry.description}
+                          </span>
+                        </SubjectTile>
+                      ))}
                     {bookmarkSubjectTable[dayi][period].map(
                       (subject, subjecti) => (
                         <SubjectTile
@@ -290,23 +343,20 @@ const TimetableElement = React.memo(
           <Link onClick={exportToTwinte}>
             <span>Twin:te にエクスポート</span>
           </Link>
-          {/*<Link>
-=======
-                    ))}
-                  </Item>
-                ))}
-              </MainColumn>
-            ))}
-          </Main>
-        </TimetableWrapper>
-        <Footer>
-          <Link onClick={exportToTwinte}>
-            <span>Twin:te にエクスポート</span>
-          </Link>
-          {/*<Link>
->>>>>>> 6a66e61a43e30268e77c6652617ca04077d03a32
-          <span>画像に保存</span>
-        </Link>*/}
+          {onSync && (
+            <SyncButton
+              type="button"
+              onClick={onSync}
+              disabled={syncBusy}
+              title={syncError ?? "履修案と TWINS の差分を確認して反映"}
+            >
+              {syncBusy
+                ? "TWINS 取得中…"
+                : syncError
+                  ? "TWINS 未接続"
+                  : "TWINS に反映"}
+            </SyncButton>
+          )}
           <Link caution={true} onClick={clearBookmarks}>
             <span>すべて削除</span>
           </Link>

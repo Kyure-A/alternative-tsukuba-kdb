@@ -45,7 +45,7 @@ const Footer = React.memo(({ filteredSubjects }: FooterProps) => {
       <List>
         <li>
           Source code is available on{" "}
-          <a href="https://github.com/Make-IT-TSUKUBA/alternative-tsukuba-kdb">
+          <a href="https://github.com/Kyure-A/alternative-tsukuba-kdb/tree/master">
             GitHub
           </a>
           .
