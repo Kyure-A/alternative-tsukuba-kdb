@@ -11,9 +11,25 @@ import {
   type TwinsPreview,
   type TwinsSnapshot,
 } from "./twins";
+import { clearTwinsCache, readTwinsCache, saveTwinsCache } from "./twinsCache";
 
-export const twinsPlanKey = (module: TwinsModule, codes: string[]) =>
-  `${module}:${[...new Set(codes)].sort().join(",")}`;
+export const twinsPlanKey = (
+  desiredByModule: Partial<Record<TwinsModule, string[]>>,
+) =>
+  TWINS_MODULES.map(
+    (module) =>
+      `${module}:${[...new Set(desiredByModule[module] ?? [])].sort().join(",")}`,
+  ).join(";");
+
+const snapshotCodes = (
+  snapshots: Partial<Record<TwinsModule, TwinsSnapshot>>,
+) => [
+  ...new Set(
+    Object.values(snapshots).flatMap((snapshot) =>
+      snapshot.entries.map((entry) => entry.code),
+    ),
+  ),
+];
 
 async function request(path: string, body?: unknown): Promise<unknown> {
   const response = await fetch(`/api/twins/${path}`, {
@@ -43,23 +59,24 @@ async function request(path: string, body?: unknown): Promise<unknown> {
 }
 
 export const useTwins = () => {
+  const [initialCache] = useState(() =>
+    readTwinsCache(localStorage, CURRENT_YEAR),
+  );
   const [snapshots, setSnapshots] = useState<
     Partial<Record<TwinsModule, TwinsSnapshot>>
-  >({});
+  >(initialCache ?? {});
   const [preview, setPreview] = useState<TwinsPreview | null>(null);
   const [reviewKey, setReviewKey] = useState("");
   const [result, setResult] = useState<TwinsApplyResult | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [importCodes, setImportCodes] = useState<string[] | null>(null);
+  const [importCodes, setImportCodes] = useState<string[] | null>(
+    initialCache ? snapshotCodes(initialCache) : null,
+  );
   const started = useRef(false);
   const available = ["localhost", "127.0.0.1"].includes(
     window.location.hostname,
   );
-
-  const remember = (snapshot: TwinsSnapshot) => {
-    setSnapshots((previous) => ({ ...previous, [snapshot.module]: snapshot }));
-  };
 
   const reload = useCallback(async () => {
     setBusy("TWINS の時間割を取得中…");
@@ -81,20 +98,17 @@ export const useTwins = () => {
           "TWINS と KdB の年度を確認し、科目データを更新してください。自動取り込みを停止しました。",
         );
       }
+      saveTwinsCache(localStorage, CURRENT_YEAR, next);
       setSnapshots(next);
-      setImportCodes([
-        ...new Set(
-          Object.values(next).flatMap((snapshot) =>
-            snapshot.entries.map((entry) => entry.code),
-          ),
-        ),
-      ]);
+      setImportCodes(snapshotCodes(next));
+      return true;
     } catch (cause) {
       setError(
         cause instanceof Error
           ? cause.message
           : "時間割を取得できませんでした。",
       );
+      return false;
     } finally {
       setBusy(null);
     }
@@ -102,15 +116,15 @@ export const useTwins = () => {
 
   useEffect(() => {
     // StrictMode replays effects; a page load still starts one read only.
-    if (!available || started.current) return;
+    if (!available || initialCache || started.current) return;
     started.current = true;
     void reload();
-  }, [available, reload]);
+  }, [available, initialCache, reload]);
 
   const review = async (
     module: TwinsModule,
     academicYear: number,
-    desiredCodes: string[],
+    desiredByModule: Partial<Record<TwinsModule, string[]>>,
   ) => {
     setBusy("全モジュールの登録状況を照合中… 数分かかることがあります。");
     setError(null);
@@ -118,12 +132,11 @@ export const useTwins = () => {
     setResult(null);
     try {
       const next = parseTwinsPreview(
-        await request("preview", { module, academicYear, desiredCodes }),
+        await request("preview", { module, academicYear, desiredByModule }),
         module,
         academicYear,
       );
-      remember(next.before);
-      setReviewKey(twinsPlanKey(module, desiredCodes));
+      setReviewKey(twinsPlanKey(desiredByModule));
       setPreview(next);
     } catch (cause) {
       setError(
@@ -153,16 +166,14 @@ export const useTwins = () => {
           (next.after ? { [next.after.module]: next.after } : {}),
       );
       if (next.snapshots) {
-        setImportCodes([
-          ...new Set(
-            Object.values(next.snapshots).flatMap((snapshot) =>
-              snapshot.entries.map((entry) => entry.code),
-            ),
-          ),
-        ]);
+        saveTwinsCache(localStorage, CURRENT_YEAR, next.snapshots);
+        setImportCodes(snapshotCodes(next.snapshots));
+      } else {
+        clearTwinsCache(localStorage);
       }
       setResult(next);
     } catch (cause) {
+      clearTwinsCache(localStorage);
       setSnapshots({});
       setError(
         `${cause instanceof Error ? cause.message : "反映結果を受信できませんでした。"} 結果が不明な場合は TWINS を読み直して確認してください。自動再送はしません。`,

@@ -9,6 +9,7 @@ import {
 } from "./timetable";
 import {
   getDesiredTwinsCodes,
+  getTwinsChanges as getTwinsPlanChanges,
   getTwinsTimeslotOverrides,
   mergeTwinsCourses,
   syncTwinsCourseBaseline,
@@ -326,6 +327,18 @@ export const useBookmark = (
     [bookmarks.subjects],
   );
 
+  const getTwinsChanges = useCallback(
+    (snapshots: Partial<Record<TwinsModule, TwinsSnapshot>>) =>
+      getTwinsPlanChanges(
+        snapshots,
+        bookmarks.subjects,
+        kdb.subjectMap,
+        CURRENT_YEAR,
+        bookmarks.twinsBaseline,
+      ),
+    [bookmarks.subjects, bookmarks.twinsBaseline],
+  );
+
   const importTwinsCourses = useCallback(
     (codes: string[]) => {
       const currentBookmarks = bookmarksRef.current;
@@ -340,6 +353,7 @@ export const useBookmark = (
       }
       return {
         added: report.added,
+        removed: report.removed,
         existing: report.alreadyPresent,
         skipped: [
           ...report.unknown,
@@ -370,6 +384,7 @@ export const useBookmark = (
       });
       return {
         added: report.added,
+        removed: report.removed,
         existing: report.alreadyPresent,
         skipped: [
           ...report.unknown,
@@ -401,6 +416,7 @@ export const useBookmark = (
     updateMemoHeaders,
     exportToTwinte,
     getTwinsPlanCodes,
+    getTwinsChanges,
     importTwinsCourses,
     syncTwinsCourses,
   };

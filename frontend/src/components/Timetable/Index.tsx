@@ -209,6 +209,7 @@ interface TimetableProps {
   onSync?: () => void;
   syncBusy: boolean;
   syncError: string | null;
+  syncDirty: boolean;
 }
 
 const TimetableElement = React.memo(
@@ -220,6 +221,7 @@ const TimetableElement = React.memo(
     onSync,
     syncBusy,
     syncError,
+    syncDirty,
   }: TimetableProps) => {
     const {
       bookmarkSubjectTable,
@@ -348,13 +350,18 @@ const TimetableElement = React.memo(
               type="button"
               onClick={onSync}
               disabled={syncBusy}
-              title={syncError ?? "履修案と TWINS の差分を確認して反映"}
+              title={
+                syncError ??
+                (syncDirty
+                  ? "保存した TWINS 情報からの変更を反映"
+                  : "保存済みの時間割を TWINS から更新")
+              }
             >
               {syncBusy
                 ? "TWINS 取得中…"
-                : syncError
-                  ? "TWINS 未接続"
-                  : "TWINS に反映"}
+                : syncDirty
+                  ? "TWINS に反映"
+                  : "TWINS から取得"}
             </SyncButton>
           )}
           <Link caution={true} onClick={clearBookmarks}>

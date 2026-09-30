@@ -39,14 +39,14 @@ const globalStyle = css`
     font-family: "Noto Sans JP";
     font-weight: 400;
     font-display: swap;
-    src: url("./NotoSansJP-Regular.ttf");
+    src: url("${import.meta.env.BASE_URL}NotoSansJP-Regular.ttf");
   }
 
   @font-face {
     font-family: "Noto Sans JP";
     font-weight: 700;
     font-display: swap;
-    src: url("./NotoSansJP-Bold.ttf");
+    src: url("${import.meta.env.BASE_URL}NotoSansJP-Bold.ttf");
   }
 `;
 
@@ -74,22 +74,22 @@ const App = () => {
   const usedClassroom = useClassroom();
   const [syncOpen, setSyncOpen] = useState(false);
   const { syncTwinsCourses } = usedBookmark;
+  const twinsChanges = usedBookmark.getTwinsChanges(twins.snapshots);
 
   useEffect(() => {
     if (twins.importCodes) syncTwinsCourses(twins.importCodes);
   }, [twins.importCodes, syncTwinsCourses]);
 
   const openSync = () => {
+    if (!twinsChanges.dirty) {
+      void twins.reload().then((ok) => {
+        if (!ok) setSyncOpen(true);
+      });
+      return;
+    }
     setSyncOpen(true);
-    if (twinsModule)
-      void twins.review(
-        twinsModule,
-        CURRENT_YEAR,
-        usedBookmark.getTwinsPlanCodes(
-          twinsModule,
-          twinsSnapshot?.entries.map((entry) => entry.code),
-        ),
-      );
+    const reviewModule = twinsChanges.modules[0] ?? twinsModule ?? "spring-a";
+    void twins.review(reviewModule, CURRENT_YEAR, twinsChanges.desiredByModule);
   };
 
   // debounce 時間
@@ -145,13 +145,14 @@ const App = () => {
         onSync={twins.available ? openSync : undefined}
         syncBusy={Boolean(twins.busy)}
         syncError={twins.error}
+        syncDirty={twinsChanges.dirty}
       />
       <TwinsSync
         isOpen={syncOpen}
         onClose={() => setSyncOpen(false)}
         twins={twins}
         usedBookmark={usedBookmark}
-        module={twinsModule}
+        module={twinsChanges.modules[0] ?? twinsModule ?? "spring-a"}
       />
       <Syllabi
         subjectCode={syllabiSubjectCode}

@@ -96,14 +96,14 @@ export function createBridgeServer({ service, distDirectory, port = 4317 }) {
       if (request.method !== "GET" && request.method !== "HEAD") {
         throw new BridgeError("method_not_allowed", "この HTTP メソッドは使用できません。", 405);
       }
-      if (url.pathname === "/" || url.pathname === BASE.slice(0, -1)) {
+      if (url.pathname === BASE.slice(0, -1)) {
         response.writeHead(302, { Location: BASE, "Cache-Control": "no-store" });
         return response.end();
       }
-      if (!url.pathname.startsWith(BASE)) throw new BridgeError("not_found", "ページが見つかりません。", 404);
+      if (url.pathname !== "/" && !url.pathname.startsWith(BASE)) throw new BridgeError("not_found", "ページが見つかりません。", 404);
       let relative;
       try {
-        relative = decodeURIComponent(url.pathname.slice(BASE.length));
+        relative = url.pathname === "/" ? "" : decodeURIComponent(url.pathname.slice(BASE.length));
       } catch {
         throw new BridgeError("not_found", "ページが見つかりません。", 404);
       }

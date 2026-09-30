@@ -8,6 +8,10 @@ import { BridgeError } from "./runner.mjs";
 import { createTwinsService, createJournal } from "./service.mjs";
 
 const MODULE = "autumn-a";
+const desiredModules = (overrides = {}) => Object.fromEntries(
+  Object.keys(MODULES).filter((module) => module !== "summer" && module !== "spring-break")
+    .map((module) => [module, overrides[module] ?? []]),
+);
 const row = (code, term = "秋A", schedule = "月1,2") => [code, `Course ${code}`, "1", "1", "1", term, schedule];
 const rawEntry = (code, module = MODULE, intensive = false) => ({
   code,
@@ -44,7 +48,7 @@ function fixture(options = {}) {
     id: () => `plan-${++counter}`,
     planTtlMs: options.planTtlMs,
   });
-  const preview = (desiredCodes) => service.preview({ module: MODULE, academicYear: 2026, desiredCodes });
+  const preview = (desiredCodes) => service.preview({ module: MODULE, academicYear: 2026, desiredByModule: desiredModules({ [MODULE]: desiredCodes }) });
   const apply = (plan, actionKeys) => service.apply({ id: plan.id, actionKeys, confirmedAcademicYear: 2026 });
   return { service, state, calls, journal, preview, apply };
 }
@@ -145,7 +149,7 @@ test("invented operations, duplicate codes, empty actions, wrong year and holida
   const f = fixture();
   await assert.rejects(async () => f.preview(["A", "A"]), { code: "invalid_request" });
   await assert.rejects(async () => f.preview(["--eval"]), { code: "invalid_code" });
-  await assert.rejects(async () => f.service.preview({ module: "summer", academicYear: 2026, desiredCodes: [] }), { code: "invalid_module" });
+  await assert.rejects(async () => f.service.preview({ module: "summer", academicYear: 2026, desiredByModule: desiredModules() }), { code: "invalid_module" });
   const plan = await f.preview(["C"]);
   await assert.rejects(f.apply(plan, ["remove:INVENTED"]), { code: "invalid_actions" });
   await assert.rejects(async () => f.apply(plan, []), { code: "no_actions" });
@@ -275,4 +279,96 @@ test("all-module import rejects as a whole when one module cannot be read", asyn
   const f = fixture({ failRead: (operation) => operation.module === "autumn-b" });
   await assert.rejects(f.service.timetables(), { code: "cli_failed" });
   assert.equal(f.calls.at(-1).module, "autumn-b");
+});
+
+const globalPreview = (f, overrides) => f.service.preview({
+  module: MODULE,
+  academicYear: 2026,
+  desiredByModule: desiredModules(overrides),
+});
+
+test("global preview deduplicates course-level additions and removals across modules", async () => {
+  const f = fixture({
+    rows: [row("A", "春A秋B"), row("B", "秋C"), row("C", "秋AB"), row("D", "春B")],
+    mutate: (operation, state) => {
+      if (operation.kind === "add") {
+        for (const module of operation.expectedModules) state[module].push(rawEntry(operation.code, module));
+      } else {
+        for (const module of Object.keys(MODULES)) state[module] = state[module].filter((entry) => entry.code !== operation.code);
+      }
+    },
+  });
+  f.state[MODULE] = [];
+  f.state["spring-a"] = [rawEntry("A", "spring-a")];
+  f.state["autumn-b"] = [rawEntry("A", "autumn-b")];
+  f.state["autumn-c"] = [rawEntry("B", "autumn-c")];
+  const plan = await globalPreview(f, {
+    "spring-b": ["D"],
+    "autumn-a": ["C"],
+    "autumn-b": ["C"],
+  });
+  assert.equal(plan.scope, "all");
+  assert.equal(plan.before.module, MODULE);
+  assert.deepEqual(plan.additions.map((action) => [action.code, action.module]), [["D", "spring-b"], ["C", "autumn-a"]]);
+  assert.deepEqual(plan.removals.map((action) => [action.code, action.module]), [["A", "spring-a"], ["B", "autumn-c"]]);
+  const result = await f.apply(plan, [...plan.removals, ...plan.additions].map((action) => action.key));
+  assert.equal(result.status, "verified");
+  assert.deepEqual(f.calls.filter((call) => call.kind !== "read").map((call) => call.key), ["add:D", "add:C", "remove:A", "remove:B"]);
+  assert.deepEqual(result.snapshots["spring-b"].entries.map((entry) => entry.code), ["D"]);
+  assert.deepEqual(result.snapshots["autumn-b"].entries.map((entry) => entry.code), ["C"]);
+});
+
+test("a course still desired in another module is never removed or re-added", async () => {
+  const f = fixture();
+  f.state["autumn-b"] = [rawEntry("A", "autumn-b")];
+  const plan = await globalPreview(f, { "autumn-a": ["B"], "autumn-b": ["A"] });
+  assert.equal(plan.additions.length, 0);
+  assert.equal(plan.removals.length, 0);
+  assert.equal(plan.blocked.length, 0);
+});
+
+test("already registered course missing a requested module is reported without duplicate add", async () => {
+  const f = fixture();
+  const plan = await globalPreview(f, { "autumn-a": ["B"], "autumn-b": ["A"] });
+  assert.equal(plan.additions.length, 0);
+  assert.equal(plan.removals.length, 0);
+  assert.equal(plan.blocked[0].code, "A");
+});
+
+test("global preview chooses a catalog-validated slot from the requested modules", async () => {
+  const f = fixture({ rows: [row("A"), row("B"), row("C", "秋B", "金5,6")] });
+  const plan = await globalPreview(f, { "autumn-a": ["A", "B", "C"], "autumn-b": ["C"] });
+  assert.equal(plan.additions.length, 1);
+  assert.equal(plan.additions[0].module, "autumn-b");
+  assert.equal(plan.additions[0].day, 4);
+  assert.equal(plan.additions[0].period, 5);
+});
+
+test("global preview requires a complete, valid six-module map", async () => {
+  const f = fixture();
+  const base = { module: MODULE, academicYear: 2026 };
+  const missing = desiredModules();
+  delete missing["spring-c"];
+  for (const desiredByModule of [undefined, null, [], missing, { ...desiredModules(), summer: [] }]) {
+    await assert.rejects(async () => f.service.preview({ ...base, desiredByModule }));
+  }
+  await assert.rejects(async () => f.service.preview({ ...base, desiredByModule: desiredModules({ "spring-a": ["A", "A"] }) }), { code: "invalid_request" });
+  await assert.rejects(async () => f.service.preview({ ...base, desiredByModule: desiredModules({ "spring-a": ["--eval"] }) }), { code: "invalid_code" });
+  assert.equal(f.calls.length, 0);
+});
+
+test("global preview protects intensive rows in any module and holiday-only registrations", async () => {
+  const f = fixture();
+  f.state.summer = [rawEntry("A", "summer", true), rawEntry("HOLIDAY", "summer")];
+  const plan = await globalPreview(f, { "autumn-a": ["B"] });
+  assert.equal(plan.removals.length, 0);
+  assert.deepEqual(plan.blocked.map((entry) => entry.code), ["A"]);
+});
+
+test("global apply rejects a stale module outside the active viewport before any writes", async () => {
+  const f = fixture();
+  const plan = await globalPreview(f, { "autumn-a": ["A", "B", "C"] });
+  f.state["spring-c"] = [rawEntry("D", "spring-c")];
+  await assert.rejects(f.apply(plan, ["add:C"]), { code: "stale_plan", status: 409 });
+  assert.equal(f.calls.filter((call) => call.kind !== "read").length, 0);
 });

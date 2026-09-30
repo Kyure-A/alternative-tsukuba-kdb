@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   ACADEMIC_YEAR,
   CODE_PATTERN,
+  EDIT_MODULES,
   MODULES,
   additionFor,
   currentAcademicYear,
@@ -113,43 +114,68 @@ export function createTwinsService({
       requireObject(body);
       const module = validateModule(body.module, true);
       validateYear(body.academicYear);
-      const desired = stringSet(body.desiredCodes, "履修予定");
+      requireObject(body.desiredByModule);
+      if (
+        Object.keys(body.desiredByModule).length !== EDIT_MODULES.length ||
+        EDIT_MODULES.some((key) => !Object.hasOwn(body.desiredByModule, key))
+      ) throw new BridgeError("invalid_modules", "全 6 モジュールの履修予定を指定してください。");
+      const desiredByModule = Object.fromEntries(EDIT_MODULES.map((key) => [
+        key,
+        stringSet(body.desiredByModule[key], `${MODULES[key]} の履修予定`),
+      ]));
+      const desired = new Set(Object.values(desiredByModule).flatMap((codes) => [...codes]));
+      if (desired.size > 300) throw new BridgeError("invalid_request", "履修予定の科目数が上限を超えています。");
       if ([...desired].some((code) => !CODE_PATTERN.test(code))) {
         throw new BridgeError("invalid_code", "科目番号の形式が正しくありません。");
       }
       return exclusive(async () => {
         const snapshots = await readAll();
         const before = snapshots[module];
-        const existing = codeSet(before);
+        const allEntries = Object.values(snapshots).flatMap((snapshot) => snapshot.entries);
+        const existing = new Set(allEntries.map((entry) => entry.code));
         const additions = [];
         const removals = [];
         const blocked = [];
         for (const code of desired) {
-          if (existing.has(code)) continue;
-          const action = additionFor(catalog, code, module);
-          if (action.kind) additions.push(action);
-          else blocked.push(action);
+          const requestedModules = EDIT_MODULES.filter((key) => desiredByModule[key].has(code));
+          if (existing.has(code)) {
+            if (requestedModules.some((key) =>
+              !snapshots[key].entries.some((entry) => entry.code === code),
+            )) {
+              blocked.push({ code, reason: "この科目は別のモジュールで既に登録されています。予定と TWINS の開講モジュールが一致しないため、TWINS で確認してください。" });
+            }
+            continue;
+          }
+          const candidates = requestedModules.map((key) => additionFor(catalog, code, key));
+          const action = candidates.find((candidate) => candidate.kind);
+          if (action) additions.push(action);
+          else blocked.push(candidates[0]);
         }
         for (const code of existing) {
           if (desired.has(code)) continue;
-          if (before.entries.some((entry) => entry.code === code && entry.intensive)) {
+          const editableRows = allEntries.filter((entry) => entry.code === code && EDIT_MODULES.includes(entry.module));
+          // Holiday-only registrations are outside the editable normal modules.
+          if (!editableRows.length) continue;
+          if (allEntries.some((entry) => entry.code === code && entry.intensive)) {
             blocked.push({ code, reason: "既存の集中・その他科目は自動変更せず保持します。削除する場合は TWINS で確認してください。" });
             continue;
           }
+          const registeredRow = editableRows.find((entry) => entry.module === module) ?? editableRows[0];
           const course = catalog.get(code);
           removals.push({
             key: `remove:${code}`,
             kind: "remove",
             code,
-            name: course?.name ?? before.entries.find((entry) => entry.code === code).description,
+            name: course?.name ?? registeredRow.description,
             catalogTerm: course?.term ?? "KdB 未掲載（TWINS で確認）",
-            module,
+            module: registeredRow.module,
           });
         }
         const created = now();
         // Expiry begins after reads complete, so slow reads do not exhaust it.
         const review = {
           id: id(),
+          scope: "all",
           academicYear: ACADEMIC_YEAR,
           expiresAt: new Date(created.getTime() + planTtlMs).toISOString(),
           before,

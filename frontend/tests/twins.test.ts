@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   getDesiredTwinsCodes,
+  getTwinsChanges,
   getTwinsTimeslotOverrides,
   isEditableTwinsModule,
   mergeTwinsCourses,
@@ -14,6 +15,7 @@ import {
   syncTwinsCourseBaseline,
   TWINS_MODULES,
   type TwinsEntry,
+  type TwinsModule,
   type TwinsPlanBookmark,
   type TwinsSnapshot,
   twinsModuleFromTermCode,
@@ -42,6 +44,9 @@ const bookmark = (overrides: Partial<TwinsPlanBookmark> = {}): TwinsPlanBookmark
   memos: ["/必修", null],
   ...overrides,
 });
+
+const snapshotSet = (entries: Partial<Record<TwinsModule, TwinsEntry[]>> = {}): Record<TwinsModule, TwinsSnapshot> =>
+  Object.fromEntries(TWINS_MODULES.map((module) => [module, { ...snapshot(entries[module] ?? []), module }])) as Record<TwinsModule, TwinsSnapshot>;
 
 test("snapshot parsing accepts empty descriptions and a genuine empty timetable", () => {
   assert.equal(parseTwinsSnapshot(snapshot([entry({ description: "" })])).entries.length, 1);
@@ -289,11 +294,92 @@ test("a previous-year baseline does not suppress current-year remote imports", (
   assert.equal(result.baseline.year, 2026);
 });
 
-test("remote removals advance the baseline without deleting local plans or notes", () => {
-  const planned = bookmark({ memos: ["register again"] });
-  const result = syncTwinsCourseBaseline({ COURSE: planned }, { year: 2026, codes: ["COURSE"] }, [], { COURSE: {} }, 2026);
-  assert.deepEqual(result.subjects.COURSE, planned);
+test("pull adopts remote removals, archives notes and remains clean instead of proposing re-registration", () => {
+  const planned = bookmark({ memos: ["course notes", null] });
+  const catalog = { COURSE: { code: "COURSE", termCodes: [[3]] } };
+  const result = syncTwinsCourseBaseline({ COURSE: planned }, { year: 2026, codes: ["COURSE"] }, [], catalog, 2026);
+  assert.equal(result.subjects.COURSE, undefined);
+  assert.deepEqual(result.report.removed, ["COURSE"]);
+  assert.deepEqual(result.baseline.archivedSubjects?.COURSE, planned);
   assert.deepEqual(result.baseline.codes, []);
+  assert.equal(getTwinsChanges(snapshotSet(), result.subjects, catalog, 2026, result.baseline).dirty, false);
+  const reappeared = syncTwinsCourseBaseline(result.subjects, result.baseline, ["COURSE"], catalog, 2026);
+  assert.deepEqual(reappeared.subjects.COURSE, planned);
+  assert.deepEqual(reappeared.report.added, ["COURSE"]);
+  assert.equal(reappeared.baseline.archivedSubjects, undefined);
+});
+
+test("pull preserves untracked local additions and pending cancellations while accepting remote deletions", () => {
+  const subjects = { REMOTE_REMOVED: bookmark(), LOCAL_ADDED: bookmark(), HISTORIC: bookmark({ year: 2025 }), TA: bookmark({ ta: true }) };
+  const catalog = Object.fromEntries(["REMOTE_REMOVED", "LOCAL_ADDED", "LOCAL_CANCELLED", "HISTORIC", "TA"].map((code) => [code, { code, termCodes: [[3]] }]));
+  const result = syncTwinsCourseBaseline(subjects, { year: 2026, codes: ["REMOTE_REMOVED", "LOCAL_CANCELLED", "HISTORIC", "TA"] }, ["LOCAL_CANCELLED"], catalog, 2026);
+  assert.deepEqual(result.report.removed, ["REMOTE_REMOVED"]);
+  assert.deepEqual(result.subjects.LOCAL_ADDED, subjects.LOCAL_ADDED);
+  assert.equal(result.subjects.LOCAL_CANCELLED, undefined);
+  assert.deepEqual(result.subjects.HISTORIC, subjects.HISTORIC);
+  assert.deepEqual(result.subjects.TA, subjects.TA);
+  const changes = getTwinsChanges(snapshotSet({ "autumn-a": [entry({ code: "LOCAL_CANCELLED" })] }), result.subjects, catalog, 2026, result.baseline);
+  assert.equal(changes.dirty, true);
+  assert.deepEqual(changes.desiredByModule["autumn-a"], ["LOCAL_ADDED"]);
+});
+
+test("an imported course stays clean even when KdB lists broader or different modules", () => {
+  const snapshots = snapshotSet({ "autumn-a": [entry(), entry({ period: 2 })] });
+  const catalog = { GE10101: { code: "GE10101", termCodes: [[0, 1, 2, 3, 4, 5]] } };
+  const result = getTwinsChanges(snapshots, { GE10101: bookmark() }, catalog, 2026, { year: 2026, codes: ["GE10101"] });
+  assert.equal(result.dirty, false);
+  assert.deepEqual(result.modules, []);
+  assert.deepEqual(result.desiredByModule["autumn-a"], ["GE10101"]);
+  assert.deepEqual(result.desiredByModule["spring-a"], []);
+  assert.deepEqual(result.desiredByModule["autumn-b"], []);
+});
+
+test("pending cancellations are dirty only after the course has been imported into the baseline", () => {
+  const snapshots = snapshotSet({ "autumn-a": [entry()] });
+  const catalog = { GE10101: { code: "GE10101", termCodes: [[3]] } };
+  assert.equal(getTwinsChanges(snapshots, {}, catalog, 2026).dirty, false);
+  const result = getTwinsChanges(snapshots, {}, catalog, 2026, { year: 2026, codes: ["GE10101"] });
+  assert.equal(result.dirty, true);
+  assert.deepEqual(result.modules, ["autumn-a"]);
+  assert.deepEqual(result.desiredByModule["autumn-a"], []);
+});
+
+test("new local courses mark every relevant editable module, regardless of the active tab", () => {
+  const result = getTwinsChanges(snapshotSet(), { NEW: bookmark(), TA: bookmark({ ta: true }), OLD: bookmark({ year: 2025 }) }, {
+    NEW: { code: "NEW", termCodes: [[0, 1], [4]] },
+    TA: { code: "TA", termCodes: [[0]] },
+    OLD: { code: "OLD", termCodes: [[0]] },
+  }, 2026, { year: 2026, codes: [] });
+  assert.equal(result.dirty, true);
+  assert.deepEqual(result.modules, ["spring-a", "spring-b", "autumn-b"]);
+  assert.deepEqual(result.desiredByModule["spring-a"], ["NEW"]);
+  assert.deepEqual(result.desiredByModule["autumn-b"], ["NEW"]);
+  assert.deepEqual(result.desiredByModule["autumn-a"], []);
+});
+
+test("unknown registered courses and conflicting historical or TA bookmarks do not create false changes", () => {
+  const snapshots = snapshotSet({ "autumn-a": [entry({ code: "UNKNOWN" }), entry({ code: "PAST" }), entry({ code: "TA" })] });
+  const catalog = { PAST: { code: "PAST", termCodes: [[3]] }, TA: { code: "TA", termCodes: [[3]] } };
+  const result = getTwinsChanges(snapshots, { PAST: bookmark({ year: 2025 }), TA: bookmark({ ta: true }) }, catalog, 2026, { year: 2026, codes: ["UNKNOWN", "PAST", "TA"] });
+  assert.equal(result.dirty, false);
+  assert.deepEqual(result.desiredByModule["autumn-a"], ["PAST", "TA", "UNKNOWN"]);
+});
+
+test("an intensive registration in any module protects that code in every normal module", () => {
+  const snapshots = snapshotSet({
+    "autumn-a": [entry()],
+    summer: [entry({ module: "summer", intensive: true, day: null, period: null })],
+  });
+  const result = getTwinsChanges(snapshots, {}, { GE10101: { code: "GE10101", termCodes: [[3], [7]] } }, 2026, { year: 2026, codes: ["GE10101"] });
+  assert.equal(result.dirty, false);
+  assert.deepEqual(result.desiredByModule["autumn-a"], ["GE10101"]);
+  assert.equal(Object.keys(result.desiredByModule).length, 6);
+});
+
+test("missing remote snapshots never imply verified dirty state", () => {
+  const result = getTwinsChanges({}, { NEW: bookmark() }, { NEW: { code: "NEW", termCodes: [[0]] } }, 2026);
+  assert.equal(result.dirty, false);
+  assert.deepEqual(result.modules, []);
 });
 
 const preview = () => ({
@@ -319,6 +405,14 @@ test("preview parsing verifies module, academic year, operation keys and concret
   const invalidSlot = preview();
   invalidSlot.additions[0].period = 0;
   assert.throws(() => parseTwinsPreview(invalidSlot));
+});
+
+test("all-module previews allow operations outside the selected review module", () => {
+  const global = { ...preview(), scope: "all" };
+  global.additions[0].module = "spring-a";
+  assert.equal(parseTwinsPreview(global, "autumn-a", 2026).additions[0].module, "spring-a");
+  global.removals[0].key = global.additions[0].key;
+  assert.throws(() => parseTwinsPreview(global));
 });
 
 test("apply parsing keeps partial/uncertain states and rejects verified results without observations", () => {

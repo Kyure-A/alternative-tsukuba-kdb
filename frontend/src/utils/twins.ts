@@ -1,12 +1,18 @@
 import { z } from "zod";
 
-export const TWINS_MODULES = [
+export const TWINS_EDITABLE_MODULES = [
   "spring-a",
   "spring-b",
   "spring-c",
   "autumn-a",
   "autumn-b",
   "autumn-c",
+] as const;
+
+export type TwinsEditableModule = (typeof TWINS_EDITABLE_MODULES)[number];
+
+export const TWINS_MODULES = [
+  ...TWINS_EDITABLE_MODULES,
   "summer",
   "spring-break",
 ] as const;
@@ -111,6 +117,7 @@ export const twinsPreviewSchema = z
     id: z.string().min(1),
     expiresAt: timestampSchema,
     academicYear: z.number().int().min(2000).max(2100),
+    scope: z.literal("all").optional(),
     before: twinsSnapshotSchema,
     additions: z.array(twinsAdditionSchema),
     removals: z.array(twinsRemovalSchema),
@@ -121,7 +128,7 @@ export const twinsPreviewSchema = z
     for (const operation of [...preview.additions, ...preview.removals]) {
       if (
         keys.has(operation.key) ||
-        operation.module !== preview.before.module
+        (preview.scope !== "all" && operation.module !== preview.before.module)
       ) {
         context.addIssue({
           code: "custom",
@@ -346,6 +353,7 @@ export function getDesiredTwinsCodes(
 
 export interface TwinsImportReport {
   added: string[];
+  removed: string[];
   alreadyPresent: string[];
   unknown: string[];
   conflicts: {
@@ -358,9 +366,93 @@ export interface TwinsImportReport {
 export const twinsBaselineSchema = z.object({
   year: z.number().int(),
   codes: z.array(codeSchema),
+  archivedSubjects: z
+    .record(
+      z.string(),
+      z.object({
+        year: z.number().int(),
+        ta: z.boolean(),
+        memos: z.array(z.string().nullable()),
+      }),
+    )
+    .optional(),
 });
 
 export type TwinsBaseline = z.infer<typeof twinsBaselineSchema>;
+
+export interface TwinsChanges {
+  dirty: boolean;
+  modules: TwinsEditableModule[];
+  desiredByModule: Record<TwinsEditableModule, string[]>;
+}
+
+/** Compare editable registration membership, retaining remotely protected rows. */
+export function getTwinsChanges(
+  snapshots: Partial<Record<TwinsModule, TwinsSnapshot>>,
+  subjects: Readonly<Record<string, Pick<TwinsPlanBookmark, "year" | "ta">>>,
+  catalog: Readonly<Record<string, TwinsCatalogSubject>>,
+  academicYear: number,
+  baseline?: TwinsBaseline,
+): TwinsChanges {
+  const baselineCodes = new Set(
+    baseline?.year === academicYear ? baseline.codes : [],
+  );
+  const observedCodes = new Set<string>();
+  const intensiveCodes = new Set<string>();
+  for (const module of TWINS_MODULES) {
+    const snapshot = snapshots[module];
+    if (!snapshot || snapshot.module !== module) continue;
+    for (const entry of snapshot.entries) {
+      observedCodes.add(entry.code);
+      if (entry.intensive) intensiveCodes.add(entry.code);
+    }
+  }
+  const modules: TwinsEditableModule[] = [];
+  const desiredByModule = Object.fromEntries(
+    TWINS_EDITABLE_MODULES.map((module) => {
+      const snapshot = snapshots[module];
+      const observed = new Set(
+        snapshot?.module === module
+          ? snapshot.entries.map(({ code }) => code)
+          : [],
+      );
+      const desired = new Set(
+        getDesiredTwinsCodes(subjects, catalog, module, academicYear, [
+          ...observed,
+        ]).filter((code) => {
+          // Existing remote courses follow TWINS module membership, which may
+          // differ from KdB. Only new local plans expand from KdB term metadata.
+          return (
+            observed.has(code) ||
+            (!observedCodes.has(code) && !baselineCodes.has(code))
+          );
+        }),
+      );
+      for (const code of observed) {
+        const bookmark = hasOwn(subjects, code) ? subjects[code] : undefined;
+        if (
+          !hasOwn(catalog, code) ||
+          intensiveCodes.has(code) ||
+          (bookmark && (bookmark.year !== academicYear || bookmark.ta)) ||
+          (!bookmark && !baselineCodes.has(code))
+        ) {
+          desired.add(code);
+        }
+      }
+      const codes = [...desired].sort();
+      // An unavailable module has no verified baseline to compare against.
+      if (
+        snapshot?.module === module &&
+        (observed.size !== desired.size ||
+          codes.some((code) => !observed.has(code)))
+      ) {
+        modules.push(module);
+      }
+      return [module, codes];
+    }),
+  ) as Record<TwinsEditableModule, string[]>;
+  return { dirty: modules.length > 0, modules, desiredByModule };
+}
 
 /** Import is additive. Existing notes, years and TA choices are never changed. */
 export function mergeTwinsCourses(
@@ -372,6 +464,7 @@ export function mergeTwinsCourses(
   const nextSubjects = { ...subjects };
   const report: TwinsImportReport = {
     added: [],
+    removed: [],
     alreadyPresent: [],
     unknown: [],
     conflicts: [],
@@ -401,8 +494,9 @@ export function mergeTwinsCourses(
 /**
  * Only a complete remote read can advance the baseline. Unchanged remote codes
  * are not re-imported: their absence locally may be a pending cancellation.
- * Remote removals leave local plans and notes intact; they can still represent
- * courses the user intends to register. A new academic year starts a new baseline.
+ * Remote removals apply only to previously tracked, current-year student courses.
+ * Their metadata is archived, while untracked local additions remain untouched.
+ * A new academic year starts a new membership baseline.
  */
 export function syncTwinsCourseBaseline(
   subjects: Readonly<Record<string, TwinsPlanBookmark>>,
@@ -425,5 +519,37 @@ export function syncTwinsCourseBaseline(
     catalog,
     academicYear,
   );
-  return { ...merged, baseline: { year: academicYear, codes } };
+  const archivedSubjects = { ...baseline?.archivedSubjects };
+  const observed = new Set(codes);
+  for (const code of previousCodes) {
+    const bookmark = hasOwn(merged.subjects, code)
+      ? merged.subjects[code]
+      : undefined;
+    if (
+      !observed.has(code) &&
+      bookmark?.year === academicYear &&
+      !bookmark.ta
+    ) {
+      archivedSubjects[code] = structuredClone(bookmark);
+      delete merged.subjects[code];
+      merged.report.removed.push(code);
+    }
+  }
+  for (const code of merged.report.added) {
+    const archived = hasOwn(archivedSubjects, code)
+      ? archivedSubjects[code]
+      : undefined;
+    if (archived?.year === academicYear && !archived.ta) {
+      merged.subjects[code] = structuredClone(archived);
+      delete archivedSubjects[code];
+    }
+  }
+  return {
+    ...merged,
+    baseline: {
+      year: academicYear,
+      codes,
+      ...(Object.keys(archivedSubjects).length > 0 ? { archivedSubjects } : {}),
+    },
+  };
 }

@@ -87,3 +87,17 @@ test("all-module endpoint performs a single service call and never caches the re
   assert.match(response.headers.get("cache-control"), /no-store/);
   assert.deepEqual(f.calls, [{ name: "timetables", value: undefined }]);
 });
+
+
+test("root serves the built page directly outside the old PWA scope without caching", async (t) => {
+  const f = await fixture(t);
+  const response = await fetch(`${f.origin}/`, { redirect: "manual" });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("location"), null);
+  assert.match(response.headers.get("cache-control"), /no-store/);
+  assert.match(response.headers.get("content-type"), /text\/html/);
+  assert.match(await response.text(), /Fixture/);
+  const base = await fetch(`${f.origin}/alternative-tsukuba-kdb/`);
+  assert.equal(base.status, 200);
+  assert.match(await base.text(), /Fixture/);
+});

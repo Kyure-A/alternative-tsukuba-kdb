@@ -40,7 +40,6 @@ export default function TwinsSync({
   const [selected, setSelected] = useState<string[]>([]);
   const [confirmed, setConfirmed] = useState(false);
   const preview = twins.preview;
-  const snapshot = module ? twins.snapshots[module] : undefined;
   const exceptional = Object.values(twins.snapshots).flatMap((item) =>
     item.entries.filter((entry) => {
       const bookmark = usedBookmark.getBookmarkSubject(entry.code);
@@ -55,14 +54,11 @@ export default function TwinsSync({
       );
     }),
   );
-  const desired = module
-    ? usedBookmark.getTwinsPlanCodes(
-        module,
-        snapshot?.entries.map((entry) => entry.code),
-      )
-    : [];
+  const { desiredByModule: desired } = usedBookmark.getTwinsChanges(
+    twins.snapshots,
+  );
   const current =
-    preview && module && twins.reviewKey === twinsPlanKey(module, desired);
+    preview && module && twins.reviewKey === twinsPlanKey(desired);
   useEffect(() => {
     setSelected(preview?.additions.map((action) => action.key) ?? []);
     setConfirmed(false);
@@ -97,7 +93,7 @@ export default function TwinsSync({
       }}
     >
       <Content>
-        <h2>TWINS へ反映{module ? ` · ${TWINS_MODULE_LABELS[module]}` : ""}</h2>
+        <h2>TWINS へ反映</h2>
         {exceptional.length > 0 && (
           <details>
             <summary>時間割の枠外・科目情報に相違のある登録</summary>
@@ -139,7 +135,7 @@ export default function TwinsSync({
                 {action.code}　{action.name}
                 <br />
                 <small>
-                  {action.catalogTerm}
+                  {TWINS_MODULE_LABELS[action.module]} · {action.catalogTerm}
                   {action.kind === "add"
                     ? ` / ${["月", "火", "水", "木", "金", "土", "日"][action.day]} ${action.period}限から`
                     : ""}

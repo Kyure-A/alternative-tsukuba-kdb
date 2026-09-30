@@ -20,7 +20,7 @@ const journal = await createJournal(path.join(root, ".twins-state.local"));
 const service = createTwinsService({ run: createRunner(), catalog: createCatalog(datasets), journal });
 const server = createBridgeServer({ service, distDirectory: path.join(root, "dist"), port });
 server.listen(port, "127.0.0.1", () => {
-  console.info(`TWINS local bridge: http://127.0.0.1:${port}/alternative-tsukuba-kdb/`);
+  console.info(`TWINS local bridge: http://127.0.0.1:${port}/`);
 });
 server.on("error", () => {
   console.error("TWINS local bridge could not start. Check PORT and local file permissions.");
